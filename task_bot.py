@@ -26,27 +26,37 @@ class InstantTaskEngine:
 
     async def send_telegram_alert(self, client: httpx.AsyncClient, task_data: dict) -> bool:
         url = f"{self.baseurl}/sendMessage"
-        
-        # Initialize Paystack payment link if secret key exists
         payment_link = "https://paystack.com"
+        
         if self.paystack_secret:
             try:
                 pay_res = await client.post(
                     "https://api.paystack.co/transaction/initialize",
-                    headers={"Authorization": f"Bearer {self.paystack_secret}", "Content-Type": "application/json"},
-                    json={"email": "verification@taskengine.internal", "amount": 250000, "metadata": {"task_title": task_data['title']}},
+                    headers={
+                        "Authorization": f"Bearer {self.paystack_secret.strip()}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "email": "customer@taskengine.internal",
+                        "amount": 250000,  # ₦2,500 escrow fee
+                        "metadata": {"task_title": task_data['title']}
+                    },
                     timeout=10.0
                 )
-                if pay_res.status_code == 200:
-                    data = pay_res.json()
-                    if data.get("status"):
-                        payment_link = data["data"]["authorization_url"]
+                data = pay_res.json()
+                if pay_res.status_code == 200 and data.get("status"):
+                    payment_link = data["data"]["authorization_url"]
+                else:
+                    logging.error(f"❌ Paystack API Response Error: {data}")
             except Exception as e:
-                logging.error(f"Paystack Init Error: {e}")
+                logging.error(f"❌ Paystack Connection Exception: {e}")
+        else:
+            logging.warning("⚠️ PAYSTACK_SECRET_KEY environment variable is missing.")
 
         inline_keyboard = {
             "inline_keyboard": [[{"text": "💳 PAY & UNLOCK GIG DETAILS (₦2,500)", "url": payment_link}]]
         }
+        
         payload = {
             "chat_id": str(self.chatid),
             "text": (
@@ -62,12 +72,13 @@ class InstantTaskEngine:
             "disable_web_page_preview": True,
             "reply_markup": inline_keyboard
         }
+        
         try:
             response = await client.post(url, json=payload, timeout=10.0)
             return response.status_code == 200
         except httpx.RequestException as e:
-            logging.error(f"❌ Dispatch Error: {e}")
-        return False
+            logging.error(f"❌ Telegram Dispatch Error: {e}")
+            return False
 
     async def fetch_latest_task(self, client: httpx.AsyncClient) -> dict:
         try:
