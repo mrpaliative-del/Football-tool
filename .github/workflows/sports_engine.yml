@@ -2,8 +2,7 @@ name: Sports Value Engine
 
 on:
   schedule:
-    - cron: '*/15 12-23 * * 6'   # Runs every 15 mins on Saturdays
-    - cron: '*/15 12-23 * * 0'   # Runs every 15 mins on Sundays
+    - cron: '*/10 * * * *'   # Runs every 10 minutes, 24/7
   workflow_dispatch:
 
 jobs:
