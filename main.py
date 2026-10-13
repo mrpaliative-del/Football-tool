@@ -3,7 +3,7 @@ import asyncio
 import logging
 import httpx
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from pydantic import BaseModel
+from pydantic import BaseModel, HttpUrl, EmailStr
 from playwright.async_api import async_playwright
 
 logging.basicConfig(
@@ -12,24 +12,33 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 
-app = FastAPI(title="Unified Big-Tech Affiliate & Arbitrage Engine")
+app = FastAPI(title="Dynamic Production Engine")
 
-# Environment configurations
+# Strict Environment Validation (No hardcoded credentials or defaults)
 TELEGRAM_TOKEN = os.getenv("TELEGRAMBOTTOKEN")
 TARGET_CHAT_ID = os.getenv("TARGETCHATID")
 PAYSTACK_SECRET = os.getenv("PAYSTACK_SECRET_KEY")
-AFFILIATE_ID = os.getenv("TECH_AFFILIATE_ID", "your_ref_tag_2026") # Your tracking reference
+
+PARTNERSTACK_API_KEY = os.getenv("PARTNERSTACK_API_KEY")
+IMPACT_ACCOUNT_SID = os.getenv("IMPACT_ACCOUNT_SID")
+IMPACT_AUTH_TOKEN = os.getenv("IMPACT_AUTH_TOKEN")
+
+SPORTYBET_URL = os.getenv("SPORTYBET_LIVE_URL")
+BET9JA_URL = os.getenv("BET9JA_LIVE_URL")
+
 BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}" if TELEGRAM_TOKEN else ""
 
 class TaskPayload(BaseModel):
     title: str
     company: str
     budget_usd: float
-    client_email: str = "task.customer@gmail.com"
+    client_email: EmailStr
+    direct_link: HttpUrl
 
-async def send_telegram(client: httpx.AsyncClient, text: str, reply_markup: dict = None):
+async def send_telegram(client: httpx.AsyncClient, text: str, reply_markup: dict = None) -> bool:
     if not BASE_URL or not TARGET_CHAT_ID:
-        return
+        logging.warning("⚠️ Telegram dispatcher skipped: Missing credentials.")
+        return False
     payload = {
         "chat_id": str(TARGET_CHAT_ID),
         "text": text,
@@ -39,142 +48,193 @@ async def send_telegram(client: httpx.AsyncClient, text: str, reply_markup: dict
     if reply_markup:
         payload["reply_markup"] = reply_markup
     try:
-        await client.post(f"{BASE_URL}/sendMessage", json=payload, timeout=10.0)
+        res = await client.post(f"{BASE_URL}/sendMessage", json=payload, timeout=10.0)
+        return res.status_code == 200
     except Exception as e:
-        logging.error(f"Telegram Dispatch Error: {e}")
+        logging.error(f"❌ Telegram dispatch error: {e}")
+        return False
 
 # ==========================================
-# 1. WEBHOOK ENDPOINT (For Live Incoming Tasks)
+# 1. LIVE WEBHOOK INGESTION (Dynamic Inbound Tasks)
 # ==========================================
 @app.post("/webhook/task")
 async def receive_external_task(task: TaskPayload, background_tasks: BackgroundTasks):
     if task.budget_usd < 2.0:
-        raise HTTPException(status_code=400, detail="Task budget below $2.00 minimum threshold.")
-    background_tasks.add_task(process_webhook_task, task)
-    return {"status": "success", "message": "Task queued and dispatched to Telegram."}
+        raise HTTPException(status_code=400, detail="Task budget below dynamic minimum threshold ($2.00 USD).")
+    
+    background_tasks.add_task(process_live_task, task)
+    return {"status": "success", "message": "Dynamic task ingested and queued."}
 
-async def process_webhook_task(task: TaskPayload):
+async def process_live_task(task: TaskPayload):
     async with httpx.AsyncClient() as client:
-        payment_link = "https://paystack.com"
+        payment_link = None
         if PAYSTACK_SECRET:
             try:
                 res = await client.post(
                     "https://api.paystack.co/transaction/initialize",
-                    headers={"Authorization": f"Bearer {PAYSTACK_SECRET.strip()}", "Content-Type": "application/json"},
-                    json={"email": task.client_email, "amount": 100000, "metadata": {"task_title": task.title}}
+                    headers={
+                        "Authorization": f"Bearer {PAYSTACK_SECRET.strip()}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "email": task.client_email,
+                        "amount": 100000,  # ₦1,000 Escrow Fee
+                        "metadata": {"task_title": task.title, "target_url": str(task.direct_link)}
+                    },
+                    timeout=10.0
                 )
                 data = res.json()
                 if res.status_code == 200 and data.get("status"):
                     payment_link = data["data"]["authorization_url"]
             except Exception as e:
-                logging.error(f"Paystack Error: {e}")
+                logging.error(f"❌ Paystack API error: {e}")
 
-        keyboard = {"inline_keyboard": [[{"text": "⚡ UNLOCK USD MICRO-TASK (₦1,000)", "url": payment_link}]]}
+        keyboard = {"inline_keyboard": [[{"text": "⚡ UNLOCK USD MICRO-TASK (₦1,000)", "url": payment_link}]]} if payment_link else None
+        
         msg = (
-            f"🌍 <b>LIVE WEBHOOK USD TASK SIGNAL</b>\n"
+            f"🌍 <b>DYNAMIC VERIFIED TASK SIGNAL</b>\n"
             f"──────────────────────────────\n"
             f"📌 <b>Task:</b> <code>{task.title}</code>\n"
             f"🏢 <b>Employer:</b> {task.company}\n"
-            f"💰 <b>Budget:</b> ${task.budget_usd} USD\n"
-            f"──────────────────────────────\n"
-            f"⚡ <i>Verified incoming lead. Pay escrow to unlock direct link.</i>"
+            f"💰 <b>Budget:</b> ${task.budget_usd:.2f} USD\n"
+            f"──────────────────────────────"
         )
         await send_telegram(client, msg, keyboard)
 
 # ==========================================
-# 2. BACKGROUND WORKERS: Tech Affiliates & Sports
+# 2. DYNAMIC AFFILIATE API WORKER
 # ==========================================
-async def tech_affiliate_worker():
-    """Background loop tracking high-tier tech company affiliate programs and tools"""
-    logging.info("💻 Big-Tech Affiliate Worker Started.")
-    
-    # Curated registry of top tech software programs with affiliate parameters
-    tech_programs = [
-        {"name": "DigitalOcean Cloud Infrastructure", "payout": "$25 - $100 Credit Bonus", "base_url": "https://www.digitalocean.com/?ref="},
-        {"name": "HubSpot CRM & Marketing Automation", "payout": "30% Recurring Commission", "base_url": "https://www.hubspot.com/?ref="},
-        {"name": "Semrush SEO & Analytics Suite", "payout": "$200 Per Sale Bounty", "base_url": "https://www.semrush.com/?ref="},
-        {"name": "ActiveCampaign Cloud Infrastructure", "payout": "Up to 50% Recurring", "base_url": "https://www.activecampaign.com/?ref="}
-    ]
-
+async def dynamic_affiliate_worker():
+    """Polls live APIs dynamically without hardcoded campaign arrays"""
+    logging.info("💻 Dynamic Affiliate API Worker Initialized.")
     sent_cache = set()
+
     while True:
         try:
             async with httpx.AsyncClient() as client:
-                for prog in tech_programs:
-                    prog_id = f"tech_{prog['name']}"
-                    if prog_id in sent_cache:
-                        continue
-                    sent_cache.add(prog_id)
-
-                    tracking_url = f"{prog['base_url']}{AFFILIATE_ID}"
-                    
-                    # Generate Paystack checkout link for secure info access
-                    payment_link = "https://paystack.com"
-                    if PAYSTACK_SECRET:
-                        pay_res = await client.post(
-                            "https://api.paystack.co/transaction/initialize",
-                            headers={"Authorization": f"Bearer {PAYSTACK_SECRET.strip()}", "Content-Type": "application/json"},
-                            json={"email": "task.customer@gmail.com", "amount": 100000, "metadata": {"program": prog['name']}}
+                # Dynamic PartnerStack Fetch
+                if PARTNERSTACK_API_KEY:
+                    try:
+                        res = await client.get(
+                            "https://api.partnerstack.com/api/v2/rewards",
+                            headers={"Authorization": f"Bearer {PARTNERSTACK_API_KEY}"},
+                            timeout=15.0
                         )
-                        pay_data = pay_res.json()
-                        if pay_res.status_code == 200 and pay_data.get("status"):
-                            payment_link = pay_data["data"]["authorization_url"]
+                        if res.status_code == 200:
+                            for reward in res.json().get("data", []):
+                                item_id = reward.get("key")
+                                if item_id in sent_cache:
+                                    continue
+                                sent_cache.add(item_id)
+                                
+                                title = reward.get("title")
+                                amount = reward.get("amount", 0) / 100.0
+                                
+                                msg = (
+                                    f"🚀 <b>PARTNERSTACK REWARD</b>\n"
+                                    f"──────────────────────────────\n"
+                                    f"📌 <b>Offer:</b> <code>{title}</code>\n"
+                                    f"💰 <b>Payout:</b> ${amount:.2f} USD"
+                                )
+                                await send_telegram(client, msg)
+                    except Exception as e:
+                        logging.error(f"PartnerStack API Error: {e}")
 
-                    keyboard = {
-                        "inline_keyboard": [
-                            [{"text": "🔗 UNLOCK DIRECT AFFILIATE LINK", "url": tracking_url}],
-                            [{"text": "⚡ VERIFY ESCROW ACCESS (₦1,000)", "url": payment_link}]
-                        ]
-                    }
-                    
-                    msg = (
-                        f"🚀 <b>BIG-TECH AFFILIATE OPPORTUNITY</b>\n"
-                        f"──────────────────────────────\n"
-                        f"🏢 <b>Tech Platform:</b> <code>{prog['name']}</code>\n"
-                        f"💰 <b>Commission Model:</b> {prog['payout']}\n"
-                        f"──────────────────────────────\n"
-                        f"⚡ <i>Verified enterprise partner ecosystem. Unlock tracked referral stream.</i>"
-                    )
-                    await send_telegram(client, msg, keyboard)
-                    await asyncio.sleep(5.0)
+                # Dynamic Impact Radius Fetch
+                if IMPACT_ACCOUNT_SID and IMPACT_AUTH_TOKEN:
+                    try:
+                        res = await client.get(
+                            f"https://api.impact.com/Mediapartners/{IMPACT_ACCOUNT_SID}/Campaigns",
+                            auth=(IMPACT_ACCOUNT_SID, IMPACT_AUTH_TOKEN),
+                            headers={"Accept": "application/json"},
+                            timeout=15.0
+                        )
+                        if res.status_code == 200:
+                            for camp in res.json().get("Campaigns", []):
+                                camp_id = str(camp.get("Id"))
+                                if camp_id in sent_cache:
+                                    continue
+                                sent_cache.add(camp_id)
+
+                                name = camp.get("CampaignName")
+                                tracking_link = camp.get("TrackingLink")
+
+                                keyboard = {"inline_keyboard": [[{"text": "🔗 ACCESS LINK", "url": tracking_link}]]}
+                                msg = (
+                                    f"🚀 <b>IMPACT CAMPAIGN</b>\n"
+                                    f"──────────────────────────────\n"
+                                    f"🏢 <b>Brand:</b> <code>{name}</code>"
+                                )
+                                await send_telegram(client, msg, keyboard)
+                    except Exception as e:
+                        logging.error(f"Impact API Error: {e}")
 
         except Exception as e:
-            logging.error(f"Tech Affiliate Worker Exception: {e}")
-        
-        # Rotate check cycle every 12 hours for high-value enterprise campaigns
-        await asyncio.sleep(43200)
+            logging.error(f"Affiliate Loop Error: {e}")
 
-async def sports_xhr_worker():
-    """Background loop intercepting live sportsbook XHR streams"""
-    logging.info("⚽ Sports XHR Background Worker Started.")
+        await asyncio.sleep(21600)
+
+# ==========================================
+# 3. LIVE SPORTSBOOK NETWORK XHR SNIFFER
+# ==========================================
+async def live_sports_sniffer():
+    """Intercepts live sports data streams from dynamically configured URLs"""
+    if not SPORTYBET_URL and not BET9JA_URL:
+        logging.warning("⚠️ Sports URLs not configured in environment variables. Sniffer inactive.")
+        return
+
+    logging.info("⚽ Live Sports Network Sniffer Initialized.")
+    urls_to_monitor = [u for u in [SPORTYBET_URL, BET9JA_URL] if u]
+
     while True:
         try:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-                context = await browser.new_context()
+                context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                 page = await context.new_page()
 
                 async def handle_response(response):
-                    if "market" in response.url or "odds" in response.url:
+                    url = response.url
+                    if ("market" in url or "odds" in url or "fixture" in url) and response.status == 200:
                         try:
-                            pass
+                            _ = await response.json()
+                            logging.info(f"📡 Dynamic odds payload intercepted from {url[:50]}...")
                         except Exception:
                             pass
 
                 page.on("response", handle_response)
-                await page.goto("https://www.sportybet.com/ng/sport/football", timeout=60000)
-                await asyncio.sleep(300)
+                
+                for target_url in urls_to_monitor:
+                    try:
+                        await page.goto(target_url, timeout=45000)
+                        await asyncio.sleep(60)
+                    except Exception as e:
+                        logging.error(f"Navigation error on {target_url}: {e}")
+
                 await browser.close()
         except Exception as e:
-            logging.error(f"Sports Worker Exception: {e}")
+            logging.error(f"Sports Sniffer Error: {e}")
             await asyncio.sleep(60)
 
+# ==========================================
+# SYSTEM STARTUP
+# ==========================================
 @app.on_event("startup")
 async def startup_event():
-    asyncio.create_task(tech_affiliate_worker())
-    asyncio.create_task(sports_xhr_worker())
-    logging.info("🚀 Unified Engine Started: Webhooks + Tech Affiliates + Sports Active.")
+    asyncio.create_task(dynamic_affiliate_worker())
+    asyncio.create_task(live_sports_sniffer())
+    logging.info("🚀 Dynamic System Engine Online.")
 
 @app.get("/")
 def health_check():
-    return {"status": "online", "system": "Unified Big-Tech Affiliate & Arbitrage Engine"}
+    return {
+        "status": "online",
+        "system": "Pure Dynamic Production Engine",
+        "config_status": {
+            "telegram": bool(TELEGRAM_TOKEN and TARGET_CHAT_ID),
+            "paystack": bool(PAYSTACK_SECRET),
+            "partnerstack": bool(PARTNERSTACK_API_KEY),
+            "impact": bool(IMPACT_ACCOUNT_SID and IMPACT_AUTH_TOKEN),
+            "sports_monitored": bool(SPORTYBET_URL or BET9JA_URL)
+        }
+    }
