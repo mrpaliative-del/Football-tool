@@ -1,6 +1,5 @@
 
 import os
-import re
 import json
 import html
 import time
@@ -18,52 +17,67 @@ import httpx
 # =========================================================
 
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s [%(levelname)s] %(message)s"
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s [%(levelname)s] %(message)s",
 )
 log = logging.getLogger("ForeignMicroTaskEngine")
 
-MINIMUM_REWARD_USD = Decimal(
-    os.getenv("MINIMUM_REWARD_USD", "0.75")
-)
+try:
+    MINIMUM_REWARD_USD = Decimal(
+        os.getenv("MINIMUM_REWARD_USD", "0.75")
+    )
+    if not MINIMUM_REWARD_USD.is_finite() or MINIMUM_REWARD_USD < 0:
+        raise ValueError("Minimum reward must be a finite non-negative number")
+except (InvalidOperation, ValueError):
+    raise SystemExit("Invalid MINIMUM_REWARD_USD configuration")
 
-SCAN_INTERVAL = max(
-    60, int(os.getenv("SCAN_INTERVAL_SECONDS", "900"))
-)
-
-DB_PATH = os.getenv(
-    "TASK_DB_PATH", "task_engine.sqlite3"
-)
-
+DB_PATH = os.getenv("TASK_DB_PATH", "task_engine.sqlite3")
 TELEGRAM_TOKEN = os.getenv("TELEGRAMBOTTOKEN", "").strip()
 TARGET_CHAT_ID = os.getenv("TARGETCHATID", "").strip()
 
-# USD value of one unit of each currency.
-# Maintain rates using a trusted exchange-rate provider.
+# Each rate represents USD per one unit of the named currency.
+# Only use exchange rates from a trusted source.
 try:
-    FX_TO_USD = {
-        currency.upper(): Decimal(str(rate))
-        for currency, rate in json.loads(
-            os.getenv("FX_TO_USD_JSON", '{"USD":"1"}')
-        ).items()
-        if Decimal(str(rate)) > 0
-    }
+    raw_fx = json.loads(
+        os.getenv("FX_TO_USD_JSON", '{"USD":"1"}')
+    )
+    if not isinstance(raw_fx, dict):
+        raise ValueError("FX configuration must be a JSON object")
+
+    FX_TO_USD = {}
+    for currency, value in raw_fx.items():
+        rate = Decimal(str(value))
+        code = str(currency).strip().upper()
+
+        if (
+            len(code) == 3
+            and code.isalpha()
+            and rate.is_finite()
+            and rate > 0
+        ):
+            FX_TO_USD[code] = rate
+
+    if "USD" not in FX_TO_USD:
+        FX_TO_USD["USD"] = Decimal("1")
+
 except (ValueError, TypeError, InvalidOperation):
-    FX_TO_USD = {"USD": Decimal("1")}
-    log.error("Invalid FX_TO_USD_JSON; check environment configuration.")
+    raise SystemExit("Invalid FX_TO_USD_JSON; expected positive currency rates")
 
 SOURCES = {
     "remoteok": "https://remoteok.com/api",
     "remotive": "https://remotive.com/api/remote-jobs",
 }
 
+HTTP_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
+MAX_FEED_ITEMS = 500
+MAX_PENDING_NOTIFICATIONS = 100
+
 
 # =========================================================
-# PERSISTENT DATABASE
+# DATABASE
 # =========================================================
 
 class Database:
-
     def __init__(self, path=DB_PATH):
         self.path = path
         self.initialize()
@@ -78,7 +92,6 @@ class Database:
     def initialize(self):
         with self.connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
-
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     task_id TEXT PRIMARY KEY,
@@ -139,6 +152,21 @@ class Database:
                     note TEXT NOT NULL,
                     created_at INTEGER NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS task_notifications (
+                    task_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    updated_at INTEGER NOT NULL,
+                    FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_tasks_status
+                    ON tasks(status);
+
+                CREATE INDEX IF NOT EXISTS idx_notifications_status
+                    ON task_notifications(status);
             """)
 
     def save_task(self, task):
@@ -153,20 +181,11 @@ class Database:
                     created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                task["task_id"],
-                task["source"],
-                task["source_id"],
-                task["title"],
-                task["company"],
-                task["url"],
-                task["reward_amount"],
-                task["reward_currency"],
-                task["reward_usd"],
-                task["reward_basis"],
-                task["eligibility"],
-                task["status"],
-                now,
-                now
+                task["task_id"], task["source"], task["source_id"],
+                task["title"], task["company"], task["url"],
+                task["reward_amount"], task["reward_currency"],
+                task["reward_usd"], task["reward_basis"],
+                task["eligibility"], task["status"], now, now,
             ))
 
             inserted = cursor.rowcount == 1
@@ -174,24 +193,55 @@ class Database:
             if inserted:
                 db.execute("""
                     INSERT INTO task_events (
-                        task_id, old_status, new_status,
-                        note, created_at
+                        task_id, old_status, new_status, note, created_at
                     ) VALUES (?, NULL, ?, ?, ?)
                 """, (
-                    task["task_id"],
-                    task["status"],
-                    "Discovered from public feed",
-                    now
+                    task["task_id"], task["status"],
+                    "Discovered from public feed; reward not independently verified",
+                    now,
                 ))
 
             return inserted
+
+    def pending_notifications(self, limit=MAX_PENDING_NOTIFICATIONS):
+        with self.connect() as db:
+            rows = db.execute("""
+                SELECT t.*
+                FROM tasks AS t
+                LEFT JOIN task_notifications AS n
+                    ON n.task_id = t.task_id
+                WHERE t.status = 'qualified'
+                  AND (n.status IS NULL OR n.status != 'sent')
+                ORDER BY t.created_at ASC
+                LIMIT ?
+            """, (limit,)).fetchall()
+
+        return [dict(row) for row in rows]
+
+    def record_notification(self, task_id, sent, error=None):
+        now = int(time.time())
+        status = "sent" if sent else "pending"
+
+        with self.connect() as db:
+            db.execute("""
+                INSERT INTO task_notifications (
+                    task_id, status, attempts, last_error, updated_at
+                ) VALUES (?, ?, 1, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    status = excluded.status,
+                    attempts = task_notifications.attempts + 1,
+                    last_error = excluded.last_error,
+                    updated_at = excluded.updated_at
+            """, (
+                task_id, status, (error or "")[:1000] or None, now,
+            ))
 
     def set_status(self, task_id, new_status, note=""):
         allowed = {
             "discovered", "qualified", "solving",
             "ready_to_submit", "submitted", "accepted",
             "payout_pending", "paid", "rejected",
-            "needs_review", "failed"
+            "needs_review", "failed",
         }
 
         if new_status not in allowed:
@@ -202,71 +252,53 @@ class Database:
         with self.connect() as db:
             row = db.execute(
                 "SELECT status FROM tasks WHERE task_id=?",
-                (task_id,)
+                (task_id,),
             ).fetchone()
 
             if not row:
                 raise KeyError("Task not found")
 
-            db.execute(
-                "UPDATE tasks SET status=?, updated_at=? WHERE task_id=?",
-                (new_status, now, task_id)
-            )
+            db.execute("""
+                UPDATE tasks SET status=?, updated_at=? WHERE task_id=?
+            """, (new_status, now, task_id))
 
             db.execute("""
                 INSERT INTO task_events (
-                    task_id, old_status, new_status,
-                    note, created_at
+                    task_id, old_status, new_status, note, created_at
                 ) VALUES (?, ?, ?, ?, ?)
             """, (
-                task_id, row["status"], new_status,
-                note[:1000], now
+                task_id, row["status"], new_status, note[:1000], now,
             ))
 
     def record_submission(
-        self, task_id, adapter, external_id,
-        status, evidence=None
+        self, task_id, adapter, external_id, status, evidence=None
     ):
         with self.connect() as db:
             db.execute("""
                 INSERT OR IGNORE INTO submissions (
-                    task_id, adapter, external_id,
-                    status, evidence, created_at
+                    task_id, adapter, external_id, status,
+                    evidence, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?)
             """, (
                 task_id, adapter, external_id, status,
-                json.dumps(evidence or {}),
-                int(time.time())
+                json.dumps(evidence or {}), int(time.time()),
             ))
 
     def credit_verified_payout(
-        self,
-        provider,
-        transaction_id,
-        currency,
-        amount,
-        verified,
-        evidence,
-        task_id=None
+        self, provider, transaction_id, currency, amount,
+        verified, evidence, task_id=None
     ):
-        """
-        Call only after an official provider adapter verifies
-        the actual incoming transaction.
-
-        `verified` must come from trusted server-side verification,
-        never directly from a user or an unverified webhook.
-        """
-
+        # `verified` must be set only by trusted server-side verification.
         if verified is not True:
             raise ValueError("Unverified payment cannot be credited")
 
-        amount = Decimal(str(amount))
-        currency = currency.upper().strip()
-        provider = provider.strip().lower()
-        transaction_id = transaction_id.strip()
-
-        if amount <= 0:
+        amount = decimal_value(amount)
+        if amount is None or amount <= 0:
             raise ValueError("Payment amount must be positive")
+
+        currency = str(currency or "").strip().upper()
+        provider = str(provider or "").strip().lower()
+        transaction_id = str(transaction_id or "").strip()
 
         if not provider or not transaction_id or not currency:
             raise ValueError("Missing transaction identifiers")
@@ -274,7 +306,6 @@ class Database:
         now = int(time.time())
 
         with self.connect() as db:
-            # Atomic transaction prevents duplicate credits.
             db.execute("BEGIN IMMEDIATE")
 
             existing = db.execute("""
@@ -285,16 +316,15 @@ class Database:
             if existing:
                 return False
 
+            # The ledger and payout record are committed together.
             db.execute("""
                 INSERT INTO payouts (
-                    provider, transaction_id, currency,
-                    amount, task_id, evidence, received_at
+                    provider, transaction_id, currency, amount,
+                    task_id, evidence, received_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(provider, transaction_id) DO NOTHING
             """, (
-                provider, transaction_id, currency,
-                str(amount), task_id,
-                json.dumps(evidence or {}), now
+                provider, transaction_id, currency, str(amount),
+                task_id, json.dumps(evidence or {}), now,
             ))
 
             db.execute("""
@@ -304,13 +334,13 @@ class Database:
                 ) VALUES (?, ?, ?, ?, ?, ?)
             """, (
                 provider, transaction_id, currency,
-                str(amount), task_id, now
+                str(amount), task_id, now,
             ))
 
             if task_id:
                 row = db.execute(
                     "SELECT status FROM tasks WHERE task_id=?",
-                    (task_id,)
+                    (task_id,),
                 ).fetchone()
 
                 if row:
@@ -326,8 +356,7 @@ class Database:
                         ) VALUES (?, ?, 'paid', ?, ?)
                     """, (
                         task_id, row["status"],
-                        f"Verified payout {provider}:{transaction_id}",
-                        now
+                        "Verified payout recorded", now,
                     ))
 
             return True
@@ -339,7 +368,6 @@ class Database:
             """).fetchall()
 
         totals = {}
-
         for row in rows:
             currency = row["currency"]
             totals[currency] = (
@@ -347,7 +375,7 @@ class Database:
                 + Decimal(row["amount"])
             )
 
-        return {k: str(v) for k, v in totals.items()}
+        return {key: str(value) for key, value in totals.items()}
 
 
 # =========================================================
@@ -359,30 +387,28 @@ def decimal_value(value):
         return None
 
     try:
-        value = Decimal(str(value).replace(",", "").strip())
-
-        if not value.is_finite() or value < 0:
+        result = Decimal(str(value).replace(",", "").strip())
+        if not result.is_finite() or result < 0:
             return None
-
-        return value
-    except (ValueError, InvalidOperation):
+        return result
+    except (ValueError, TypeError, InvalidOperation):
         return None
 
 
 def valid_https_url(value):
     try:
         parsed = urlparse(str(value))
-        return parsed.scheme == "https" and bool(parsed.netloc)
-    except Exception:
+        return (
+            parsed.scheme == "https"
+            and bool(parsed.hostname)
+            and not parsed.username
+            and not parsed.password
+        )
+    except (TypeError, ValueError):
         return False
 
 
 def qualify_reward(amount, currency, basis):
-    """
-    Qualifies total task/project rewards, not ambiguous salaries.
-    Returns (qualifies, USD equivalent, explanation).
-    """
-
     amount = decimal_value(amount)
 
     if amount is None or not currency:
@@ -391,8 +417,7 @@ def qualify_reward(amount, currency, basis):
     if basis not in {"task_total", "fixed_project"}:
         return False, None, "Total task reward not established"
 
-    rate = FX_TO_USD.get(currency.upper())
-
+    rate = FX_TO_USD.get(str(currency).upper())
     if rate is None:
         return False, None, "No configured exchange rate"
 
@@ -401,58 +426,74 @@ def qualify_reward(amount, currency, basis):
     if reward_usd < MINIMUM_REWARD_USD:
         return False, reward_usd, "Below minimum reward"
 
-    return True, reward_usd, "Qualified"
+    return True, reward_usd, "Qualified by feed fields; verify original listing"
 
 
 # =========================================================
-# FEED ADAPTERS
+# FEED NORMALIZATION
 # =========================================================
 
 def normalize_job(source, job):
+    if not isinstance(job, dict):
+        return None
+
     if source == "remoteok":
         title = job.get("position")
         company = job.get("company") or "Unknown company"
         url = job.get("url") or job.get("apply_url")
         source_id = str(job.get("id") or url or "")
-    else:
+    elif source == "remotive":
         title = job.get("title")
         company = job.get("company_name") or "Unknown company"
         url = job.get("url")
         source_id = str(job.get("id") or url or "")
+    else:
+        return None
 
     if not title or not url or not valid_https_url(url):
         return None
 
-    # Public feed salary data is not automatically a per-task reward.
-    # Only explicitly normalized reward fields are accepted.
+    title = str(title).strip()
+    company = str(company).strip()
+
+    if not title:
+        return None
+
     amount = decimal_value(job.get("reward_amount"))
-    currency = job.get("reward_currency")
-    basis = job.get("reward_basis", "unknown")
+    currency_value = job.get("reward_currency")
+    currency = (
+        str(currency_value).strip().upper()
+        if currency_value else None
+    )
+    basis = str(job.get("reward_basis", "unknown")).strip()
 
     qualifies, reward_usd, reason = qualify_reward(
         amount, currency, basis
     )
 
+    stable_source_id = source_id or (
+        title + "|" + company + "|" + str(url)
+    )
     stable_id = hashlib.sha256(
-        f"{source}:{source_id or title + str(company)}".encode()
+        f"{source}:{stable_source_id}".encode("utf-8")
     ).hexdigest()
 
     return {
         "task_id": stable_id,
         "source": source,
-        "source_id": source_id,
-        "title": str(title)[:300],
-        "company": str(company)[:200],
-        "url": url,
+        "source_id": stable_source_id[:500],
+        "title": title[:300],
+        "company": company[:200],
+        "url": str(url),
         "reward_amount": str(amount) if amount is not None else None,
-        "reward_currency": currency.upper() if currency else None,
+        "reward_currency": currency,
         "reward_usd": str(reward_usd) if reward_usd is not None else None,
-        "reward_basis": basis,
+        "reward_basis": basis[:100] or "unknown",
         "eligibility": str(
             job.get("candidate_required_location")
             or job.get("location")
             or "Not verified"
-        ),
+        )[:500],
         "status": "qualified" if qualifies else "needs_review",
         "qualification_reason": reason,
         "qualifies": qualifies,
@@ -460,23 +501,31 @@ def normalize_job(source, job):
 
 
 # =========================================================
-# TELEGRAM ALERTS
+# TELEGRAM
 # =========================================================
 
 async def send_telegram(client, task):
     if not TELEGRAM_TOKEN or not TARGET_CHAT_ID:
-        return False
+        return False, "Telegram credentials are not configured"
+
+    reward_usd = decimal_value(task.get("reward_usd"))
+    if reward_usd is None:
+        return False, "Qualified task has no valid USD equivalent"
 
     message = (
-        "🌍 <b>MICROTASK OPPORTUNITY</b>\n"
+        "🌍 <b>TASK OPPORTUNITY — CHECK BEFORE APPLYING</b>\n"
         "────────────────────\n"
-        f"📌 <b>Task:</b> {html.escape(task['title'])}\n"
+        f"📌 <b>Title:</b> {html.escape(task['title'])}\n"
         f"🏢 <b>Company:</b> {html.escape(task['company'])}\n"
-        f"💰 <b>Reward:</b> {html.escape(str(task['reward_amount']))} "
+        f"💰 <b>Listed reward:</b> "
+        f"{html.escape(str(task['reward_amount']))} "
         f"{html.escape(str(task['reward_currency']))}\n"
-        f"💵 <b>USD equivalent:</b> ${Decimal(task['reward_usd']):.2f}\n"
+        f"💵 <b>Estimated USD:</b> ${reward_usd:.2f}\n"
         f"🌐 <b>Eligibility:</b> {html.escape(task['eligibility'])}\n"
-        "⚠️ <i>Discovery is not proof of hiring, acceptance or payment.</i>\n"
+        f"🧾 <b>Reward basis:</b> "
+        f"{html.escape(task['reward_basis'])}\n"
+        "⚠️ <i>Check eligibility, terms and reward with the provider. "
+        "This is not proof of acceptance or payment.</i>\n"
         f'🔗 <a href="{html.escape(task["url"], quote=True)}">'
         "Open original listing</a>"
     )
@@ -488,70 +537,60 @@ async def send_telegram(client, task):
                 "chat_id": TARGET_CHAT_ID,
                 "text": message,
                 "parse_mode": "HTML",
-                "disable_web_page_preview": True
+                "disable_web_page_preview": True,
             },
-            timeout=10
+            timeout=15,
         )
 
         response.raise_for_status()
-        return response.json().get("ok") is True
+        body = response.json()
 
-    except (httpx.HTTPError, ValueError):
-        log.exception("Telegram notification failed")
-        return False
+        if body.get("ok") is True:
+            return True, None
+
+        return False, str(body.get("description", "Telegram API rejected message"))
+
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("Telegram notification failed: %s", type(exc).__name__)
+        return False, str(exc)[:500]
 
 
 # =========================================================
-# SOLVER / DELIVERY / PAYOUT ADAPTER CONTRACTS
+# PROVIDER ADAPTER CONTRACTS
 # =========================================================
 
 class SolverAdapter:
-    """
-    Implement for a specific task provider and task type.
-    Do not submit fabricated answers or bypass provider restrictions.
-    """
-
     name = "unconfigured"
 
     async def solve(self, task):
         raise NotImplementedError(
-            "Configure a provider-approved solver adapter"
+            "Implement a provider-approved solver adapter"
         )
 
 
 class DeliveryAdapter:
-    """
-    Submit through an authorized provider API or submission interface.
-    """
-
     name = "unconfigured"
 
     async def deliver(self, task, result):
         raise NotImplementedError(
-            "Configure an authorized delivery adapter"
+            "Implement an authorized task submission adapter"
         )
 
 
 class PayoutVerificationAdapter:
-    """
-    Connect this to the provider's official payout API or a verified
-    transaction export. Never assume that an accepted task was paid.
-    """
-
     name = "unconfigured"
 
     async def fetch_verified_payouts(self):
         raise NotImplementedError(
-            "Configure an official payout verification adapter"
+            "Implement official payout verification"
         )
 
 
 # =========================================================
-# ENGINE
+# ENGINE — ONE SCAN PER INVOCATION
 # =========================================================
 
 class ForeignMicroTaskEngine:
-
     def __init__(self):
         self.db = Database()
 
@@ -560,88 +599,115 @@ class ForeignMicroTaskEngine:
             response = await client.get(
                 url,
                 headers={
-                    "User-Agent": "ForeignMicroTaskEngine/1.0"
+                    "User-Agent": "ForeignMicroTaskEngine/1.0",
+                    "Accept": "application/json",
                 },
-                timeout=15
             )
             response.raise_for_status()
             data = response.json()
 
             if source == "remoteok":
-                return [
-                    x for x in data
-                    if isinstance(x, dict) and x.get("position")
+                if not isinstance(data, list):
+                    log.warning("Unexpected RemoteOK response format")
+                    return []
+                jobs = [
+                    item for item in data
+                    if isinstance(item, dict) and item.get("position")
                 ]
 
-            if source == "remotive":
-                return data.get("jobs", [])
+            elif source == "remotive":
+                if not isinstance(data, dict):
+                    log.warning("Unexpected Remotive response format")
+                    return []
+                jobs = data.get("jobs", [])
+                if not isinstance(jobs, list):
+                    log.warning("Remotive jobs field is not a list")
+                    return []
 
-        except (httpx.HTTPError, ValueError):
-            log.exception("Feed failed: %s", source)
+            else:
+                return []
 
-        return []
+            return jobs[:MAX_FEED_ITEMS]
+
+        except (httpx.HTTPError, ValueError) as exc:
+            log.warning(
+                "Feed request failed for %s: %s",
+                source, type(exc).__name__,
+            )
+            return []
+
+    async def deliver_pending_notifications(self, client):
+        pending = self.db.pending_notifications()
+        sent_count = 0
+
+        for task in pending:
+            sent, error = await send_telegram(client, task)
+            self.db.record_notification(task["task_id"], sent, error)
+
+            if sent:
+                sent_count += 1
+                log.info("Telegram alert sent for task %s", task["task_id"])
+            else:
+                log.warning(
+                    "Notification remains pending for %s",
+                    task["task_id"],
+                )
+
+        return sent_count, len(pending)
 
     async def scan_once(self):
-        discovered = 0
-        qualified = 0
+        new_listings = 0
+        qualified_new = 0
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
             for source, url in SOURCES.items():
                 jobs = await self.fetch_feed(client, source, url)
                 log.info("%s returned %d listings", source, len(jobs))
 
                 for job in jobs:
                     task = normalize_job(source, job)
-
                     if task is None:
                         continue
 
-                    is_new = self.db.save_task(task)
-
-                    if not is_new:
+                    if not self.db.save_task(task):
                         continue
 
-                    discovered += 1
+                    new_listings += 1
 
-                    if not task["qualifies"]:
+                    if task["qualifies"]:
+                        qualified_new += 1
                         log.info(
-                            "Saved for review: %s (%s)",
+                            "Reward fields meet configured threshold: %s",
                             task["title"],
-                            task["qualification_reason"]
                         )
-                        continue
+                    else:
+                        log.info(
+                            "Saved for review: %s — %s",
+                            task["title"],
+                            task["qualification_reason"],
+                        )
 
-                    qualified += 1
-                    sent = await send_telegram(client, task)
+            sent, attempted = await self.deliver_pending_notifications(client)
 
-                    log.info(
-                        "Qualified task saved: %s; Telegram sent=%s",
-                        task["title"], sent
-                    )
+        log.info(
+            "Scan complete: new=%d, newly_qualified=%d, "
+            "notifications_sent=%d/%d, ledger=%s",
+            new_listings, qualified_new, sent, attempted,
+            self.db.balances(),
+        )
 
-        return discovered, qualified
-
-    async def run_forever(self):
-        log.info("Foreign MicroTask Engine starting")
-        log.info("Minimum reward: $%s", MINIMUM_REWARD_USD)
-        log.info("Database: %s", DB_PATH)
-
-        while True:
-            try:
-                discovered, qualified = await self.scan_once()
-
-                log.info(
-                    "Cycle finished: %d new listings, %d qualified",
-                    discovered, qualified
-                )
-
-                log.info("Verified earnings ledger: %s", self.db.balances())
-
-            except Exception:
-                log.exception("Scan cycle failed")
-
-            await asyncio.sleep(SCAN_INTERVAL)
+    async def run_once(self):
+        log.info("Global task engine starting")
+        log.info("Minimum reward threshold: USD %s", MINIMUM_REWARD_USD)
+        log.info("Database path: %s", DB_PATH)
+        await self.scan_once()
 
 
 if __name__ == "__main__":
-    asyncio.run(ForeignMicroTaskEngine().run_forever())
+    try:
+        asyncio.run(ForeignMicroTaskEngine().run_once())
+    except KeyboardInterrupt:
+        log.info("Engine stopped")
+    except Exception:
+        log.exception("Engine failed")
+        raise
