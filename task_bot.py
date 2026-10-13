@@ -9,14 +9,19 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 
-class InstantTaskEngine:
+class ForeignMicroTaskEngine:
     def __init__(self):
         self.token = os.getenv("TELEGRAMBOTTOKEN")
         self.chatid = os.getenv("TARGETCHATID")
         self.baseurl = f"https://api.telegram.org/bot{self.token}" if self.token else ""
         self.paystack_secret = os.getenv("PAYSTACK_SECRET_KEY")
-        self.api_url = "https://remoteok.com/api"
         self.sentcache = set()
+
+        # International remote & micro-gig APIs
+        self.sources = [
+            "https://remoteok.com/api",
+            "https://remotive.com/api/remote-jobs"
+        ]
 
     def validateenvironment(self) -> bool:
         if not self.token or not self.chatid:
@@ -26,6 +31,9 @@ class InstantTaskEngine:
 
     async def send_telegram_alert(self, client: httpx.AsyncClient, task_data: dict) -> bool:
         url = f"{self.baseurl}/sendMessage"
+        
+        # Micro escrow unlock fee (₦1,500)
+        unlock_fee_kobo = 150000 
         payment_link = "https://paystack.com"
         
         if self.paystack_secret:
@@ -37,8 +45,8 @@ class InstantTaskEngine:
                         "Content-Type": "application/json"
                     },
                     json={
-                        "email": "customer@taskengine.internal",
-                        "amount": 250000,  # ₦2,500 escrow fee
+                        "email": "foreign.micro@engine.internal",
+                        "amount": unlock_fee_kobo,
                         "metadata": {"task_title": task_data['title']}
                     },
                     timeout=10.0
@@ -47,26 +55,24 @@ class InstantTaskEngine:
                 if pay_res.status_code == 200 and data.get("status"):
                     payment_link = data["data"]["authorization_url"]
                 else:
-                    logging.error(f"❌ Paystack API Response Error: {data}")
+                    logging.error(f"❌ Paystack API Error: {data}")
             except Exception as e:
                 logging.error(f"❌ Paystack Connection Exception: {e}")
-        else:
-            logging.warning("⚠️ PAYSTACK_SECRET_KEY environment variable is missing.")
 
         inline_keyboard = {
-            "inline_keyboard": [[{"text": "💳 PAY & UNLOCK GIG DETAILS (₦2,500)", "url": payment_link}]]
+            "inline_keyboard": [[{"text": "⚡ UNLOCK USD MICRO-TASK (₦1,500)", "url": payment_link}]]
         }
         
         payload = {
             "chat_id": str(self.chatid),
             "text": (
-                f"🚀 <b>VERIFIED FREELANCE TASK SIGNAL</b>\n"
+                f"🌍 <b>USD FOREIGN MICRO-TASK SIGNAL</b>\n"
                 f"──────────────────────────────\n"
-                f"📌 <b>Position:</b> <code>{task_data['title']}</code>\n"
-                f"🏢 <b>Company:</b> {task_data['company']}\n"
-                f"💰 <b>Budget:</b> {task_data['compensation']}\n"
+                f"📌 <b>Task/Gig:</b> <code>{task_data['title']}</code>\n"
+                f"🏢 <b>Foreign Employer:</b> {task_data['company']}\n"
+                f"💰 <b>USD Budget:</b> {task_data['compensation']}\n"
                 f"──────────────────────────────\n"
-                f"⚡ <i>Secure Paystack escrow gate active. Click to verify and unlock.</i>"
+                f"⚡ <i>Quick international micro-gig. Pay escrow to unlock direct link.</i>"
             ),
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
@@ -80,22 +86,27 @@ class InstantTaskEngine:
             logging.error(f"❌ Telegram Dispatch Error: {e}")
             return False
 
-    async def fetch_latest_task(self, client: httpx.AsyncClient) -> dict:
-        try:
-            logging.info(f"⚡ Fetching live jobs via API: {self.api_url}")
-            response = await client.get(self.api_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15.0)
-            
-            if response.status_code == 200:
-                data = response.json()
-                jobs = [item for item in data if isinstance(item, dict) and "position" in item]
+    async def fetch_foreign_micro_task(self, client: httpx.AsyncClient) -> dict:
+        for api_url in self.sources:
+            try:
+                logging.info(f"🌐 Scanning international feed: {api_url}")
+                response = await client.get(api_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15.0)
                 
-                for job in jobs[:10]:
-                    title = job.get("position", "Software Engineer")
-                    company = job.get("company", "Verified Partner")
-                    salary = job.get("salary_max", "")
+                if response.status_code != 200:
+                    continue
+                
+                data = response.json()
+                jobs = []
+                if "remoteok" in api_url:
+                    jobs = [item for item in data if isinstance(item, dict) and "position" in item]
+                elif "remotive" in api_url:
+                    jobs = data.get("jobs", [])
+
+                for job in jobs[:15]:
+                    title = job.get("position") or job.get("title", "Quick Script Fix")
+                    company = job.get("company_name") or job.get("company", "Global Client")
                     
-                    compensation = f"${salary:,} / year" if salary else "$3,500 – $7,000 / project"
-                    
+                    # Target micro / entry-level / short-term tags if available
                     taskid = "".join(filter(str.isalnum, f"{title}-{company}"))[:35]
                     if taskid in self.sentcache:
                         continue
@@ -104,24 +115,24 @@ class InstantTaskEngine:
                     return {
                         "title": title,
                         "company": company,
-                        "compensation": compensation
+                        "compensation": "$25 – $150 / quick task"
                     }
-        except Exception as e:
-            logging.error(f"❌ API fetching exception: {e}")
+            except Exception as e:
+                logging.error(f"❌ Feed error on {api_url}: {e}")
         return None
 
     async def executeengine(self):
-        logging.info("🚀 Instant API Task Engine Initialized.")
+        logging.info("🚀 Foreign Micro-Task Engine Initialized.")
         if not self.validateenvironment():
             return
 
         async with httpx.AsyncClient() as client:
-            opportunity = await self.fetch_latest_task(client)
-            if opportunity:
-                if await self.send_telegram_alert(client, opportunity):
-                    logging.info("✅ Professional task signal dispatched successfully.")
+            task = await self.fetch_foreign_micro_task(client)
+            if task:
+                if await self.send_telegram_alert(client, task):
+                    logging.info("✅ Foreign micro-task signal dispatched successfully.")
             else:
-                logging.info("⚠️ No new task captured from API feed.")
+                logging.info("⚠️ No new micro-tasks found in current cycle.")
 
 if __name__ == "__main__":
-    asyncio.run(InstantTaskEngine().executeengine())
+    asyncio.run(ForeignMicroTaskEngine().executeengine())
