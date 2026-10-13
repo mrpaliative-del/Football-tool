@@ -49,7 +49,6 @@ class ContinuousArbitrageEngine:
     async def scrape_bookmaker(self, page, url: str, bookmaker_name: str) -> dict:
         odds_map = {}
         try:
-            # Quick check if page needs navigation or direct scan
             if page.url != url:
                 await page.goto(url, timeout=45000, wait_until="domcontentloaded")
                 await asyncio.sleep(5.0)
@@ -85,7 +84,7 @@ class ContinuousArbitrageEngine:
                     for line in lines[2:]:
                         try:
                             val = float(line.replace(",", "."))
-                            if 1.05 <= val <= 40.0:
+                            if 1.05 <= val <= 35.0:
                                 valid_odds.append(val)
                         except ValueError:
                             continue
@@ -101,13 +100,12 @@ class ContinuousArbitrageEngine:
         return odds_map
 
     async def executeengine(self):
-        logging.info("🚀 High-Frequency Arbitrage Daemon Starting...")
+        logging.info("🚀 High-Yield (5%+ ROI) Arbitrage Engine Starting...")
         if not self.validateenvironment():
             return
 
-        # Run high-frequency loop for 10 minutes (600 seconds) per workflow trigger
-        RUN_DURATION = 600  
-        POLL_INTERVAL = 5.0  # 5-second scanning interval
+        RUN_DURATION = 600  # 10-minute workflow execution block
+        POLL_INTERVAL = 5.0
         start_time = time.time()
 
         async with async_playwright() as p:
@@ -123,7 +121,7 @@ class ContinuousArbitrageEngine:
             page_b = await context.new_page()
 
             async with httpx.AsyncClient() as client:
-                await self.send_telemetry(client, "⚡ <b>High-Frequency Arbitrage Loop Started</b>\nScanning live markets every 5 seconds...")
+                await self.send_telemetry(client, "⚡ <b>5%+ Arbitrage Engine Active</b>\nScanning live spreads for high-margin opportunities...")
 
                 scan_count = 0
                 while (time.time() - start_time) < RUN_DURATION:
@@ -141,8 +139,11 @@ class ContinuousArbitrageEngine:
                         o_a, o_b = odds_a[fix], odds_b[fix]
                         implied_prob = (1.0 / o_a) + (1.0 / o_b)
 
-                        if implied_prob < 0.99:
-                            roi = round((1.0 - implied_prob) * 100, 2)
+                        # Calculate ROI percentage
+                        roi = round((1.0 - implied_prob) * 100, 2)
+
+                        # Filter specifically for 5.0% and above profit yield (up to 50% max sanity check)
+                        if 5.0 <= roi <= 50.0:
                             cache_key = f"{fix}_{o_a}_{o_b}"
                             
                             if cache_key in self.sentcache:
@@ -153,18 +154,18 @@ class ContinuousArbitrageEngine:
                             stake_b = self.round_to_nearest(int(self.bankroll * ((1.0 / o_b) / implied_prob)))
 
                             alert_text = (
-                                f"🚨 <b>INSTANT ARBITRAGE SIGNAL DETECTED</b>\n"
+                                f"🔥 <b>HIGH-MARGIN ARBITRAGE SIGNAL (+{roi}%)</b>\n"
                                 f"──────────────────────────────\n"
                                 f"🏆 <b>Fixture:</b> {fix}\n"
-                                f"📈 <b>SportyBet:</b> {o_a} | <b>Stake:</b> ₦{stake_a}\n"
-                                f"📈 <b>Bet9ja:</b> {o_b} | <b>Stake:</b> ₦{stake_b}\n"
+                                f"📈 <b>Bookmaker A (SportyBet):</b> {o_a} | <b>Stake:</b> ₦{stake_a:,}\n"
+                                f"📈 <b>Bookmaker B (Bet9ja):</b> {o_b} | <b>Stake:</b> ₦{stake_b:,}\n"
                                 f"💰 <b>Guaranteed ROI:</b> +{roi}%"
                             )
                             await self.send_telemetry(client, alert_text)
 
                     await asyncio.sleep(POLL_INTERVAL)
 
-                await self.send_telemetry(client, f"🏁 <b>Session Complete</b>\nPerformed {scan_count} high-frequency scans.")
+                await self.send_telemetry(client, f"🏁 <b>Session Complete</b>\nExecuted {scan_count} high-frequency scans for 5%+ spreads.")
 
             await browser.close()
 
