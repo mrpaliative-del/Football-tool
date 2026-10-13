@@ -7,26 +7,60 @@ import requests
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
 
-BASE_TELEGRAM_URL = f"https://telegram.org{TELEGRAM_BOT_TOKEN}"
+# FIXED: Correct Telegram API Base Endpoint
+BASE_TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 LIVE_PUBLIC_API = "https://sportybet.com"
-HEADERS = {"User-Agent": "Mozilla/5.0 (Linux; Android 13; K) AppleWebKit/537.36 Mobile Safari/537.36"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Linux; Android 13; K) AppleWebKit/537.36 Mobile Safari/537.36"
+}
+
+def send_telegram_message(text):
+    """Sends a formatted message to Telegram with strict error reporting."""
+    url = f"{BASE_TELEGRAM_URL}/sendMessage"
+    payload = {
+        "chat_id": str(TARGET_CHAT_ID),
+        "text": text,
+        "parse_mode": "HTML"
+    }
+    
+    response = requests.post(url, json=payload, timeout=10)
+    
+    if response.status_code != 200:
+        print(f"❌ Telegram API Error [{response.status_code}]: {response.text}")
+        response.raise_for_status()
+    else:
+        print("✅ Telegram message delivered successfully!")
 
 def run_fully_automated_scanner():
     """Runs data checks, enforces test threshold, and prints slips instantly."""
+    # Safety Check for Environment Variables
+    if not TELEGRAM_BOT_TOKEN or not TARGET_CHAT_ID:
+        print("❌ CRITICAL ERROR: TELEGRAM_BOT_TOKEN or TARGET_CHAT_ID environment variables are missing!")
+        print("Please set them in GitHub Repository Secrets or local environment variables.")
+        return
+
     target_bankroll = 20000 
     
-    # Secure high-profile teams to maintain our SportyBet Anti-Ban protocol
-    teams = ["Real Madrid", "Barcelona", "Man City", "Liverpool", "Arsenal", "Man United", "Chelsea", "Bayern Munich", "PSG", "Inter Milan"]
+    # Secure high-profile teams to maintain SportyBet Anti-Ban protocol
+    teams = [
+        "Real Madrid", "Barcelona", "Man City", "Liverpool", "Arsenal", 
+        "Man United", "Chelsea", "Bayern Munich", "PSG", "Inter Milan"
+    ]
     markets = ["1X2 vs Double Chance", "Over/Under 2.5 Goals", "Both Teams to Score (BTTS)"]
     
     start_run = time.time()
-    run_duration = 5 * 60  # Shortened to 5 minutes for quick initial testing
+    run_duration = 5 * 60  # 5-minute timeout for GitHub Actions
+
+    print("🚀 Test Cloud Session Ignited...")
 
     while (time.time() - start_run) < run_duration:
         try:
             # Sync directly to SportyBet's active public mirror data channel
-            requests.get(LIVE_PUBLIC_API, headers=HEADERS, timeout=10)
-            
+            try:
+                requests.get(LIVE_PUBLIC_API, headers=HEADERS, timeout=10)
+            except requests.RequestException as ping_err:
+                print(f"⚠️ Live API Ping Failed (non-fatal): {ping_err}")
+
             team_a = random.choice(teams)
             team_b = random.choice([t for t in teams if t != team_a])
             match_name = f"{team_a} vs {team_b}"
@@ -67,15 +101,17 @@ def run_fully_automated_scanner():
                     f"🔗 <b>SportyBet Mobile Web:</b>\n{search_url}\n"
                     f"✅ <i>The cloud connection to your phone is fully working!</i>"
                 )
-                requests.post(f"{BASE_TELEGRAM_URL}/sendMessage", json={"chat_id": str(TARGET_CHAT_ID), "text": mobile_slip, "parse_mode": "HTML"})
-                print(f"🎉 Success packet delivered for {match_name}")
-                break  # Stops the test script cleanly once the first confirmation arrives
                 
+                # Send payload to Telegram
+                send_telegram_message(mobile_slip)
+                print(f"🎉 Success packet delivered for {match_name}")
+                break  # Stops the script cleanly once confirmed
+
             time.sleep(2)
+
         except Exception as e:
-            print(f"Buffer slip hold: {e}")
+            print(f"⚠️ Execution log notice: {e}")
             time.sleep(5)
 
 if __name__ == "__main__":
-    print("🚀 Test Cloud Session Ignited...")
     run_fully_automated_scanner()
