@@ -30,10 +30,9 @@ class GlobalTaskGapEngine:
         return True
 
     async def sendtelegramalert(self, client: httpx.AsyncClient, task_data: dict) -> bool:
-        """Dispatches formatted HTML task alerts with optional 5G action buttons to Telegram."""
+        """Dispatches formatted HTML task alerts with optional action buttons to Telegram."""
         url = f"{self.baseurl}/sendMessage"
         
-        # Optional 5G Interactive Action Button for instant execution/opening
         inline_keyboard = {
             "inline_keyboard": [
                 [
@@ -72,17 +71,17 @@ class GlobalTaskGapEngine:
         return False
 
     async def scantaskgaps(self, page) -> dict:
-        """Polls high-frequency task boards to capture fresh entries without sitting idle."""
+        """Polls high-frequency task boards with robust fallback selectors."""
         try:
             logging.info(f"Navigating to task stream: {self.targeturl}")
             await page.goto(self.targeturl, timeout=30000, wait_until="domcontentloaded")
             await asyncio.sleep(5.0)
 
-            # Target dynamic list items that update frequently across boards
-            items = await page.locator("tr.job, .job-card, tr.athing, .gig-item").all()
-            logging.info(f"Found {len(items)} live task listings on the board.")
+            # Broadened fallback selectors to avoid empty returns when board DOM structures shift
+            items = await page.locator("tr.job, .job-card, tr, article, div[data-id]").all()
+            logging.info(f"Found {len(items)} live raw elements on the board.")
 
-            for item in items[:15]:
+            for item in items[:20]:
                 try:
                     text_content = await item.inner_text()
                     lines = [l.strip() for l in text_content.split("\n") if l.strip()]
@@ -91,6 +90,10 @@ class GlobalTaskGapEngine:
                         continue
 
                     title = lines[0]
+                    # Filter out short or navigation header text fragments
+                    if len(title) < 5 or "remote" in title.lower() and len(lines) == 1:
+                        continue
+
                     taskid = "".join(filter(str.isalnum, title))[:35]
 
                     if taskid in self.sentcache:
@@ -131,6 +134,7 @@ class GlobalTaskGapEngine:
 
             async with httpx.AsyncClient() as client:
                 starttime = asyncio.get_event_loop().time()
+                opportunity = None
 
                 while (asyncio.get_event_loop().time() - starttime) < 90:
                     opportunity = await self.scantaskgaps(page)
@@ -140,6 +144,15 @@ class GlobalTaskGapEngine:
                             break
 
                     await asyncio.sleep(10.0)
+
+                # Fallback safeguard: If zero listings parsed during test, send system status ping
+                if not opportunity:
+                    logging.info("⚠️ No matching task snippet captured. Sending runner status check...")
+                    await self.sendtelegramalert(client, {
+                        "title": "Task Engine Health Check Run",
+                        "snippet": "Runner successfully executed, but no new unique tasks matched current filters.",
+                        "source": self.targeturl
+                    })
 
             await browser.close()
 
