@@ -1,8 +1,10 @@
 name: Global Task Gap Engine
 
 on:
+  push:
+    branches: [ "main" ]
   schedule:
-    - cron: '0 */2 * * *'
+    - cron: '*/15 * * * *'   # Runs every 15 minutes, 24/7
   workflow_dispatch:
 
 jobs:
@@ -20,21 +22,11 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install playwright httpx
-          playwright install chromium --with-deps
-
-      - name: Send Telegram Diagnostic Ping
-        env:
-          TOKEN: ${{ secrets.TELEGRAMBOTTOKEN }}
-          CHATID: ${{ secrets.TARGETCHATID }}
-        run: |
-          curl -s -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" \
-          -d "chat_id=$CHATID" \
-          -d "text=🚨 GitHub Actions Diagnostic: Task Engine Workflow Triggered Successfully!"
+          pip install httpx
 
       - name: Execute Global Task Engine
         env:
           TELEGRAMBOTTOKEN: ${{ secrets.TELEGRAMBOTTOKEN }}
           TARGETCHATID: ${{ secrets.TARGETCHATID }}
-          PAYSTACK_SECRET_KEY: ${{ secrets.PAYSTACK_SECRET_KEY }}
+          PAYSTACK_SECRET_KEY: ${{ secrets.PAYSTACK_SE... }} # Use your exact secret name
         run: python task_bot.py
