@@ -4,7 +4,10 @@ on:
   push:
     branches: [ main ]
   schedule:
-    - cron: '0 */6 * * *'  # Automatically restarts the script every 6 hours
+    # ─── HIGH-FREQUENCY NATIVE CRON SCRIPT ───
+    # This explicit cron instruction forces GitHub's clock to automatically launch 
+    # your system container every 15 minutes, completely independent of human touch.
+    - cron: '*/15 * * * *'
 
 jobs:
   run-scanner:
