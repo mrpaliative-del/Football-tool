@@ -28,5 +28,5 @@ jobs:
         env:
           TELEGRAMBOTTOKEN: ${{ secrets.TELEGRAMBOTTOKEN }}
           TARGETCHATID: ${{ secrets.TARGETCHATID }}
-          PAYSTACK_SECRET_KEY: ${{ secrets.PAYSTACK_SE... }} # Use your exact secret name
+          PAYSTACK_SECRET_KEY: ${{ secrets.PAYSTACK_SECRET_KEY }}
         run: python task_bot.py
