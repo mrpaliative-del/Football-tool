@@ -11,15 +11,15 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 
-class ContinuousArbitrageEngine:
+class MultiMatchArbitrageEngine:
     def __init__(self):
         self.token = os.getenv("TELEGRAMBOTTOKEN")
         self.chatid = os.getenv("TARGETCHATID")
         self.baseurl = f"https://api.telegram.org/bot{self.token}" if self.token else ""
         self.bankroll = float(os.getenv("BANKROLLPOOL", "20000"))
         
-        self.bookmaker_a_url = os.getenv("BOOKMAKER_A_URL", "https://www.sportybet.com/ng/sport/football/live")
-        self.bookmaker_b_url = os.getenv("BOOKMAKER_B_URL", "https://www.bet9ja.com/sport/live")
+        self.bookmaker_a_url = os.getenv("BOOKMAKER_A_URL", "https://www.sportybet.com/ng/sport/football")
+        self.bookmaker_b_url = os.getenv("BOOKMAKER_B_URL", "https://www.bet9ja.com/sport/soccer")
         self.sentcache = set()
 
     def validateenvironment(self) -> bool:
@@ -37,7 +37,7 @@ class ContinuousArbitrageEngine:
         url = f"{self.baseurl}/sendMessage"
         payload = {
             "chat_id": str(self.chatid),
-            "text": f"⚽ <b>SPORT ENGINE TELEMETRY</b>\n──────────────────────────────\n{message}",
+            "text": f"⚽ <b>MULTI-MATCH ARBITRAGE TELEMETRY</b>\n──────────────────────────────\n{message}",
             "parse_mode": "HTML",
             "disable_web_page_preview": True
         }
@@ -53,6 +53,10 @@ class ContinuousArbitrageEngine:
                 await page.goto(url, timeout=45000, wait_until="domcontentloaded")
                 await asyncio.sleep(5.0)
 
+            # Optional scroll down to trigger lazy loading of additional fixtures
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await asyncio.sleep(2.0)
+
             selectors = [
                 ".match-row", ".af-match", "tr.match", 
                 "div[class*='match']", "div[class*='event']", 
@@ -65,7 +69,8 @@ class ContinuousArbitrageEngine:
                 if len(elements) > 2:
                     break
 
-            for elem in elements[:40]:
+            # Process ALL elements found without truncation caps to maximize match coverage
+            for elem in elements:
                 try:
                     text = await elem.inner_text()
                     lines = [l.strip() for l in text.split("\n") if l.strip()]
@@ -100,12 +105,12 @@ class ContinuousArbitrageEngine:
         return odds_map
 
     async def executeengine(self):
-        logging.info("🚀 High-Yield (5%+ ROI) Arbitrage Engine Starting...")
+        logging.info("🚀 Multi-Match Arbitrage Engine Initialized.")
         if not self.validateenvironment():
             return
 
-        RUN_DURATION = 600  # 10-minute workflow execution block
-        POLL_INTERVAL = 5.0
+        RUN_DURATION = 600  # 10-minute check cycle per workflow run
+        POLL_INTERVAL = 15.0
         start_time = time.time()
 
         async with async_playwright() as p:
@@ -121,12 +126,12 @@ class ContinuousArbitrageEngine:
             page_b = await context.new_page()
 
             async with httpx.AsyncClient() as client:
-                await self.send_telemetry(client, "⚡ <b>5%+ Arbitrage Engine Active</b>\nScanning live spreads for high-margin opportunities...")
+                await self.send_telemetry(client, "⚡ <b>Multi-Match Engine Active</b>\nScanning all loaded fixtures for concurrent 5%+ arbitrage opportunities...")
 
                 scan_count = 0
                 while (time.time() - start_time) < RUN_DURATION:
                     scan_count += 1
-                    logging.info(f"🔄 Scan Cycle #{scan_count}")
+                    logging.info(f"🔄 Multi-Match Scan Cycle #{scan_count}")
 
                     odds_a, odds_b = await asyncio.gather(
                         self.scrape_bookmaker(page_a, self.bookmaker_a_url, "SportyBet"),
@@ -134,40 +139,45 @@ class ContinuousArbitrageEngine:
                     )
 
                     common_fixtures = set(odds_a.keys()).intersection(set(odds_b.keys()))
+                    found_signals_in_cycle = 0
 
                     for fix in common_fixtures:
                         o_a, o_b = odds_a[fix], odds_b[fix]
                         implied_prob = (1.0 / o_a) + (1.0 / o_b)
-
-                        # Calculate ROI percentage
                         roi = round((1.0 - implied_prob) * 100, 2)
 
-                        # Filter specifically for 5.0% and above profit yield (up to 50% max sanity check)
+                        # Capture multiple matches meeting the 5%+ profit threshold
                         if 5.0 <= roi <= 50.0:
-                            cache_key = f"{fix}_{o_a}_{o_b}"
+                            cache_key = f"multi_{fix}_{o_a}_{o_b}"
                             
                             if cache_key in self.sentcache:
                                 continue
                             self.sentcache.add(cache_key)
+                            found_signals_in_cycle += 1
 
                             stake_a = self.round_to_nearest(int(self.bankroll * ((1.0 / o_a) / implied_prob)))
                             stake_b = self.round_to_nearest(int(self.bankroll * ((1.0 / o_b) / implied_prob)))
 
                             alert_text = (
-                                f"🔥 <b>HIGH-MARGIN ARBITRAGE SIGNAL (+{roi}%)</b>\n"
+                                f"🔥 <b>MULTIPLE ARBITRAGE MATCH FOUND (+{roi}%)</b>\n"
                                 f"──────────────────────────────\n"
                                 f"🏆 <b>Fixture:</b> {fix}\n"
-                                f"📈 <b>Bookmaker A (SportyBet):</b> {o_a} | <b>Stake:</b> ₦{stake_a:,}\n"
-                                f"📈 <b>Bookmaker B (Bet9ja):</b> {o_b} | <b>Stake:</b> ₦{stake_b:,}\n"
+                                f"📈 <b>SportyBet:</b> {o_a} | <b>Stake:</b> ₦{stake_a:,}\n"
+                                f"📈 <b>Bet9ja:</b> {o_b} | <b>Stake:</b> ₦{stake_b:,}\n"
                                 f"💰 <b>Guaranteed ROI:</b> +{roi}%"
                             )
                             await self.send_telemetry(client, alert_text)
+                            # Brief pause between multiple rapid dispatches to avoid Telegram rate limits
+                            await asyncio.sleep(1.0)
+
+                    if found_signals_in_cycle > 0:
+                        logging.info(f"✅ Dispatched {found_signals_in_cycle} concurrent match arbitrage signals.")
 
                     await asyncio.sleep(POLL_INTERVAL)
 
-                await self.send_telemetry(client, f"🏁 <b>Session Complete</b>\nExecuted {scan_count} high-frequency scans for 5%+ spreads.")
+                await self.send_telemetry(client, f"🏁 <b>Session Complete</b>\nProcessed {scan_count} multi-match scanning cycles.")
 
             await browser.close()
 
 if __name__ == "__main__":
-    asyncio.run(ContinuousArbitrageEngine().executeengine())
+    asyncio.run(MultiMatchArbitrageEngine().executeengine())
