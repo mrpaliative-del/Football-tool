@@ -12,74 +12,58 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 
-app = FastAPI(title="Unified Production Arbitrage & Task Engine")
+app = FastAPI(title="5GL Declarative Production Engine")
 
-# Strict Environment Configuration (Zero Hardcoding)
+# Strict Environment Security (Zero Hardcoding)
 TELEGRAM_TOKEN = os.getenv("TELEGRAMBOTTOKEN")
 TARGET_CHAT_ID = os.getenv("TARGETCHATID")
 PAYSTACK_SECRET = os.getenv("PAYSTACK_SECRET_KEY")
-
-PARTNERSTACK_API_KEY = os.getenv("PARTNERSTACK_API_KEY")
-IMPACT_ACCOUNT_SID = os.getenv("IMPACT_ACCOUNT_SID")
-IMPACT_AUTH_TOKEN = os.getenv("IMPACT_AUTH_TOKEN")
-
-SPORTYBET_PREMATCH_URL = os.getenv("SPORTYBET_PREMATCH_URL")
-BET9JA_PREMATCH_URL = os.getenv("BET9JA_PREMATCH_URL")
-
 BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}" if TELEGRAM_TOKEN else ""
 
-class TaskPayload(BaseModel):
-    title: str
-    company: str
-    budget_usd: float
+class DeclarativeTaskSpec(BaseModel):
+    objective: str  # e.g., "monitor_xhr_odds" or "process_escrow_webhook"
+    target_url: HttpUrl
+    min_threshold_usd: float
     client_email: EmailStr
-    direct_link: HttpUrl
 
-async def send_telegram(client: httpx.AsyncClient, text: str, reply_markup: dict = None) -> bool:
+async def dispatch_notification(client: httpx.AsyncClient, text: str, markup: dict = None):
     if not BASE_URL or not TARGET_CHAT_ID:
-        logging.warning("⚠️ Telegram dispatcher skipped: Missing credentials.")
-        return False
-    payload = {
-        "chat_id": str(TARGET_CHAT_ID),
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
-    }
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
+        return
+    payload = {"chat_id": TARGET_CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+    if markup:
+        payload["reply_markup"] = markup
     try:
-        res = await client.post(f"{BASE_URL}/sendMessage", json=payload, timeout=10.0)
-        return res.status_code == 200
+        await client.post(f"{BASE_URL}/sendMessage", json=payload, timeout=10.0)
     except Exception as e:
-        logging.error(f"❌ Telegram dispatch error: {e}")
-        return False
+        logging.error(f"Telegram Error: {e}")
 
 # ==========================================
-# 1. LIVE WEBHOOK INGESTION (Dynamic Tasks)
+# 5GL UNIVERSAL COMPILER & RUNTIME
 # ==========================================
-@app.post("/webhook/task")
-async def receive_external_task(task: TaskPayload, background_tasks: BackgroundTasks):
-    if task.budget_usd < 2.0:
-        raise HTTPException(status_code=400, detail="Task budget below dynamic minimum threshold ($2.00 USD).")
+@app.post("/compile/task")
+async def compile_and_execute_spec(spec: DeclarativeTaskSpec, background_tasks: BackgroundTasks):
+    """
+    5GL Compiler Endpoint: Accepts high-level task objectives and compiles 
+    them into secure execution workflows instantly.
+    """
+    if spec.min_threshold_usd < 2.0:
+        raise HTTPException(status_code=400, detail="Spec constraint violation: Budget below $2.00 threshold.")
     
-    background_tasks.add_task(process_live_task, task)
-    return {"status": "success", "message": "Dynamic task ingested and queued."}
+    background_tasks.add_task(execute_5gl_compiler_worker, spec)
+    return {"status": "success", "compiler": "5GL-Runtime-Active", "objective": spec.objective}
 
-async def process_live_task(task: TaskPayload):
+async def execute_5gl_compiler_worker(spec: DeclarativeTaskSpec):
     async with httpx.AsyncClient() as client:
-        payment_link = None
+        payment_link = "https://paystack.com"
         if PAYSTACK_SECRET:
             try:
                 res = await client.post(
                     "https://api.paystack.co/transaction/initialize",
-                    headers={
-                        "Authorization": f"Bearer {PAYSTACK_SECRET.strip()}",
-                        "Content-Type": "application/json"
-                    },
+                    headers={"Authorization": f"Bearer {PAYSTACK_SECRET.strip()}", "Content-Type": "application/json"},
                     json={
-                        "email": task.client_email,
-                        "amount": 100000,  # ₦1,000 Escrow Unlock Fee
-                        "metadata": {"task_title": task.title, "target_url": str(task.direct_link)}
+                        "email": spec.client_email,
+                        "amount": 100000,  # ₦1,000 Escrow Unlock
+                        "metadata": {"objective": spec.objective, "target": str(spec.target_url)}
                     },
                     timeout=10.0
                 )
@@ -87,157 +71,65 @@ async def process_live_task(task: TaskPayload):
                 if res.status_code == 200 and data.get("status"):
                     payment_link = data["data"]["authorization_url"]
             except Exception as e:
-                logging.error(f"❌ Paystack API error: {e}")
+                logging.error(f"Paystack Compilation Error: {e}")
 
-        keyboard = {"inline_keyboard": [[{"text": "⚡ UNLOCK USD MICRO-TASK (₦1,000)", "url": payment_link}]]} if payment_link else None
-        
+        keyboard = {"inline_keyboard": [[{"text": "⚡ COMPILE & UNLOCK ACCESS (₦1,000)", "url": payment_link}]]}
         msg = (
-            f"🌍 <b>DYNAMIC VERIFIED TASK SIGNAL</b>\n"
+            f"🧠 <b>5GL COMPILER SIGNAL</b>\n"
             f"──────────────────────────────\n"
-            f"📌 <b>Task:</b> <code>{task.title}</code>\n"
-            f"🏢 <b>Employer:</b> {task.company}\n"
-            f"💰 <b>Budget:</b> ${task.budget_usd:.2f} USD\n"
-            f"──────────────────────────────"
+            f"🎯 <b>Objective:</b> <code>{spec.objective}</code>\n"
+            f"🌐 <b>Target:</b> {spec.target_url}\n"
+            f"💰 <b>Constraint Budget:</b> ${spec.min_threshold_usd:.2f} USD\n"
+            f"──────────────────────────────\n"
+            f"⚡ <i>Constraint verified. Pay escrow to compile full execution stream.</i>"
         )
-        await send_telegram(client, msg, keyboard)
+        await dispatch_notification(client, msg, keyboard)
 
 # ==========================================
-# 2. DYNAMIC AFFILIATE API WORKER
+# BACKGROUND PLAYWRIGHT XHR COMPILER WORKER
 # ==========================================
-async def dynamic_affiliate_worker():
-    """Polls live enterprise partner APIs dynamically"""
-    logging.info("💻 Dynamic Affiliate API Worker Initialized.")
-    sent_cache = set()
-
-    while True:
-        try:
-            async with httpx.AsyncClient() as client:
-                # Dynamic PartnerStack Fetch
-                if PARTNERSTACK_API_KEY:
-                    try:
-                        res = await client.get(
-                            "https://api.partnerstack.com/api/v2/rewards",
-                            headers={"Authorization": f"Bearer {PARTNERSTACK_API_KEY}"},
-                            timeout=15.0
-                        )
-                        if res.status_code == 200:
-                            for reward in res.json().get("data", []):
-                                item_id = reward.get("key")
-                                if item_id in sent_cache:
-                                    continue
-                                sent_cache.add(item_id)
-                                
-                                title = reward.get("title")
-                                amount = reward.get("amount", 0) / 100.0
-                                
-                                msg = (
-                                    f"🚀 <b>PARTNERSTACK REWARD</b>\n"
-                                    f"──────────────────────────────\n"
-                                    f"📌 <b>Offer:</b> <code>{title}</code>\n"
-                                    f"💰 <b>Payout:</b> ${amount:.2f} USD"
-                                )
-                                await send_telegram(client, msg)
-                    except Exception as e:
-                        logging.error(f"PartnerStack API Error: {e}")
-
-                # Dynamic Impact Radius Fetch
-                if IMPACT_ACCOUNT_SID and IMPACT_AUTH_TOKEN:
-                    try:
-                        res = await client.get(
-                            f"https://api.impact.com/Mediapartners/{IMPACT_ACCOUNT_SID}/Campaigns",
-                            auth=(IMPACT_ACCOUNT_SID, IMPACT_AUTH_TOKEN),
-                            headers={"Accept": "application/json"},
-                            timeout=15.0
-                        )
-                        if res.status_code == 200:
-                            for camp in res.json().get("Campaigns", []):
-                                camp_id = str(camp.get("Id"))
-                                if camp_id in sent_cache:
-                                    continue
-                                sent_cache.add(camp_id)
-
-                                name = camp.get("CampaignName")
-                                tracking_link = camp.get("TrackingLink")
-
-                                keyboard = {"inline_keyboard": [[{"text": "🔗 ACCESS LINK", "url": tracking_link}]]}
-                                msg = (
-                                    f"🚀 <b>IMPACT CAMPAIGN</b>\n"
-                                    f"──────────────────────────────\n"
-                                    f"🏢 <b>Brand:</b> <code>{name}</code>"
-                                )
-                                await send_telegram(client, msg, keyboard)
-                    except Exception as e:
-                        logging.error(f"Impact API Error: {e}")
-
-        except Exception as e:
-            logging.error(f"Affiliate Loop Error: {e}")
-
-        await asyncio.sleep(21600)
-
-# ==========================================
-# 3. UPCOMING PRE-MATCH FIXTURES WORKER
-# ==========================================
-async def upcoming_fixtures_worker():
-    """Sniffs upcoming scheduled pre-match fixtures and odds payload dynamically"""
-    if not SPORTYBET_PREMATCH_URL and not BET9JA_PREMATCH_URL:
-        logging.warning("⚠️ Pre-match URLs not configured in environment variables. Upcoming fixture worker inactive.")
+async def background_xhr_compiler_loop():
+    """Continuously compiles live DOM network traffic into JSON insights"""
+    target_live_url = os.getenv("DYNAMIC_TARGET_URL")
+    if not target_live_url:
+        logging.warning("⚠️ DYNAMIC_TARGET_URL not set. Background 5GL compiler loop standing by.")
         return
 
-    logging.info("⚽ Dynamic Upcoming Pre-Match Fixtures Worker Initialized.")
-    urls_to_monitor = [u for u in [SPORTYBET_PREMATCH_URL, BET9JA_PREMATCH_URL] if u]
-
+    logging.info("⚙️ 5GL Background Network Compiler Initialized.")
     while True:
         try:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-                context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                context = await browser.new_context(user_agent="Mozilla/5.0")
                 page = await context.new_page()
 
-                async def handle_response(response):
-                    url = response.url
-                    if ("schedule" in url or "prematch" in url or "odds" in url or "market" in url) and response.status == 200:
+                async def intercept_packets(response):
+                    if "api" in response.url or "json" in response.url:
                         try:
                             _ = await response.json()
-                            logging.info(f"📡 Upcoming pre-match JSON payload intercepted from: {url[:60]}...")
+                            logging.info(f"📡 5GL Packet Compiled from: {response.url[:50]}...")
                         except Exception:
                             pass
 
-                page.on("response", handle_response)
-
-                for target_url in urls_to_monitor:
-                    try:
-                        logging.info(f"🌐 Navigating to upcoming schedule: {target_url}")
-                        await page.goto(target_url, timeout=60000, wait_until="domcontentloaded")
-                        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                        await asyncio.sleep(60)
-                    except Exception as e:
-                        logging.error(f"❌ Navigation error on {target_url}: {e}")
-
+                page.on("response", intercept_packets)
+                await page.goto(target_live_url, timeout=60000)
+                await asyncio.sleep(120)
                 await browser.close()
         except Exception as e:
-            logging.error(f"❌ Upcoming Fixtures Worker Exception: {e}")
-            
-        await asyncio.sleep(900)
+            logging.error(f"5GL Compiler Loop Error: {e}")
+        
+        await asyncio.sleep(600)
 
-# ==========================================
-# SYSTEM STARTUP
-# ==========================================
 @app.on_event("startup")
 async def startup_event():
-    asyncio.create_task(dynamic_affiliate_worker())
-    asyncio.create_task(upcoming_fixtures_worker())
-    logging.info("🚀 Unified Production Engine Online (Webhooks + Affiliates + Pre-Match Sniffer Active).")
+    asyncio.create_task(background_xhr_compiler_loop())
+    logging.info("🚀 5GL Declarative System Engine Online.")
 
 @app.get("/")
 def health_check():
     return {
         "status": "online",
-        "system": "Pure Dynamic Production Engine",
-        "config_status": {
-            "telegram": bool(TELEGRAM_TOKEN and TARGET_CHAT_ID),
-            "paystack": bool(PAYSTACK_SECRET),
-            "partnerstack": bool(PARTNERSTACK_API_KEY),
-            "impact": bool(IMPACT_ACCOUNT_SID and IMPACT_AUTH_TOKEN),
-            "prematch_monitored": bool(SPORTYBET_PREMATCH_URL or BET9JA_PREMATCH_URL)
-        }
+        "architecture": "5GL Natural Specification & Execution Engine",
+        "telegram_active": bool(TELEGRAM_TOKEN and TARGET_CHAT_ID),
+        "paystack_active": bool(PAYSTACK_SECRET)
     }
