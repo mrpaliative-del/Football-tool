@@ -8,7 +8,6 @@ on:
 
 jobs:
   run-scanner:
-    runs-allowed: write
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
