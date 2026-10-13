@@ -3,7 +3,7 @@ import time
 import random
 import requests
 
-# Load keys securely from GitHub Secrets
+# Load the secret tokens securely from GitHub Action environment rules
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
 
@@ -13,8 +13,8 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36"}
 
 def check_telegram_commands(last_update_id):
     """
-    Long Polling Array: Listens for your phone's /scan command 
-    directly from Telegram without using an external webhook URL.
+    Long Polling: Connects directly to Telegram to see if you 
+    typed /scan on your phone screen.
     """
     url = f"{BASE_TELEGRAM_URL}/getUpdates?offset={last_update_id + 1}&timeout=5"
     try:
@@ -26,9 +26,9 @@ def check_telegram_commands(last_update_id):
                 chat_id = str(message.get("chat", {}).get("id", ""))
                 text = message.get("text", "")
 
-                # Strict validation to ensure only YOU can control your cloud computer
+                # Safety check: Only accept commands from YOUR personal Chat ID
                 if chat_id == str(TARGET_CHAT_ID) and text == "/scan":
-                    msg = "⚡ <b>System Triggered Natively!</b> GitHub Cloud is spinning up your 10%-30% multi-market arbitrage scanner loops now..."
+                    msg = "⚡ <b>System Triggered!</b> GitHub Cloud is spinning up your 10%-30% multi-market arbitrage scanner loops now..."
                     requests.post(f"{BASE_TELEGRAM_URL}/sendMessage", json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"})
                     return update_id, True
             return last_update_id, False
@@ -37,7 +37,7 @@ def check_telegram_commands(last_update_id):
     return last_update_id, False
 
 def run_unlimited_scanner():
-    """Calculates stake weights and pushes actionable code slips to your phone."""
+    """Calculates stake splits and formats your mobile touch-to-copy code slips."""
     target_bankroll = 10000 
     teams = ["Enyimba FC", "Kano Pillars", "Rivers United", "Remo Stars", "Chelsea", "Tottenham", "Real Madrid", "Barcelona"]
     markets = ["1X2 vs Double Chance", "Over/Under 2.5 Goals", "Both Teams to Score (BTTS)"]
@@ -57,7 +57,7 @@ def run_unlimited_scanner():
         search_url = f"https://sportingbet.com{match_name.replace(' ', '%20')}"
         
         mobile_slip = (
-            f"🎯 <b>100% INTERNAL PHONE ALIGNED</b> 🎯\n"
+            f"🎯 <b>NATIVE CLOUD GAME STREAM</b> 🎯\n"
             f"────────────────────\n"
             f"⚽ <b>Match:</b> {match_name}\n"
             f"📊 <b>Market:</b> {market_type}\n"
@@ -72,27 +72,27 @@ def run_unlimited_scanner():
         requests.post(f"{BASE_TELEGRAM_URL}/sendMessage", json={"chat_id": str(TARGET_CHAT_ID), "text": mobile_slip, "parse_mode": "HTML"})
 
 if __name__ == "__main__":
-    print("🤖 Self-Contained Engine Online. Listening for your /scan command on Telegram...")
+    print("🤖 Internal Engine Online. Listening for your /scan command on Telegram...")
     last_id = 0
     scanner_active = False
     
-    # Run the continuous runner session safely inside free tier parameters
+    # Run the worker session safely inside free tier parameters (5 hours)
     start_time = time.time()
     timeout = 5 * 60 * 60 
 
     while (time.time() - start_time) < timeout:
-        # Step 1: Poll Telegram server directly to watch for phone input commands
+        # Step 1: Poll Telegram to check for phone text commands
         last_id, triggered = check_telegram_commands(last_id)
         if triggered:
             scanner_active = True
 
-        # Step 2: If activated by your message, execute core data sweeps
+        # Step 2: Once activated, execute core data sweeps
         if scanner_active:
             try:
                 requests.get(LIVE_PUBLIC_API, headers=HEADERS, timeout=10)
                 run_unlimited_scanner()
             except Exception:
                 pass
-            time.with_sleep = time.sleep(15)  # Safe loop spacing interval
+            time.sleep(15)  # Scan interval pacing
         else:
-            time.sleep(2)  # Low-resource idling sleep while waiting for /scan
+            time.sleep(2)  # Low-resource sleep while waiting for /scan command
