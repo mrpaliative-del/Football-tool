@@ -17,7 +17,6 @@ class ForeignMicroTaskEngine:
         self.paystack_secret = os.getenv("PAYSTACK_SECRET_KEY")
         self.sentcache = set()
 
-        # International remote & micro-gig APIs
         self.sources = [
             "https://remoteok.com/api",
             "https://remotive.com/api/remote-jobs"
@@ -32,8 +31,7 @@ class ForeignMicroTaskEngine:
     async def send_telegram_alert(self, client: httpx.AsyncClient, task_data: dict) -> bool:
         url = f"{self.baseurl}/sendMessage"
         
-        # Micro escrow unlock fee (₦1,000 for $2+ micro-tasks)
-        unlock_fee_kobo = 100000 
+        unlock_fee_kobo = 100000  # ₦1,000
         payment_link = "https://paystack.com"
         
         if self.paystack_secret:
@@ -45,19 +43,24 @@ class ForeignMicroTaskEngine:
                         "Content-Type": "application/json"
                     },
                     json={
-                        "email": "foreign.micro@engine.internal",
+                        "email": "task.customer@gmail.com",  # Standardized valid test email format
                         "amount": unlock_fee_kobo,
                         "metadata": {"task_title": task_data['title']}
                     },
                     timeout=10.0
                 )
                 data = pay_res.json()
+                logging.info(f"Paystack Raw Response Status: {pay_res.status_code}")
+                logging.info(f"Paystack Raw Response Data: {data}")
+
                 if pay_res.status_code == 200 and data.get("status"):
                     payment_link = data["data"]["authorization_url"]
                 else:
-                    logging.error(f"❌ Paystack API Error: {data}")
+                    logging.error(f"❌ Paystack Initialization Failed: {data}")
             except Exception as e:
                 logging.error(f"❌ Paystack Connection Exception: {e}")
+        else:
+            logging.warning("⚠️ PAYSTACK_SECRET_KEY environment variable is missing from GitHub Secrets.")
 
         inline_keyboard = {
             "inline_keyboard": [[{"text": "⚡ UNLOCK USD MICRO-TASK (₦1,000)", "url": payment_link}]]
@@ -106,12 +109,10 @@ class ForeignMicroTaskEngine:
                     title = job.get("position") or job.get("title", "Quick Task")
                     company = job.get("company_name") or job.get("company", "Global Client")
                     
-                    # Check salary fields or assign a micro-task tier starting from $2+
                     salary_min = job.get("salary_min")
                     if salary_min and salary_min >= 2:
                         compensation = f"${salary_min:,} / task"
                     else:
-                        # Default baseline for fast micro-gigs meeting the $2+ threshold
                         compensation = "$5 – $50 / quick micro-task"
 
                     taskid = "".join(filter(str.isalnum, f"{title}-{company}"))[:35]
@@ -129,7 +130,7 @@ class ForeignMicroTaskEngine:
         return None
 
     async def executeengine(self):
-        logging.info("🚀 Foreign Micro-Task Engine ($2+ Filter) Initialized.")
+        logging.info("🚀 Foreign Micro-Task Engine Initialized.")
         if not self.validateenvironment():
             return
 
@@ -137,7 +138,7 @@ class ForeignMicroTaskEngine:
             task = await self.fetch_foreign_micro_task(client)
             if task:
                 if await self.send_telegram_alert(client, task):
-                    logging.info("✅ Foreign micro-task signal ($2+) dispatched successfully.")
+                    logging.info("✅ Foreign micro-task signal dispatched successfully.")
             else:
                 logging.info("⚠️ No qualifying micro-tasks found in current cycle.")
 
