@@ -5,7 +5,6 @@ import time
 import httpx
 from playwright.async_api import async_playwright
 
-# ─── LOGGING CONFIGURATION ───
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -18,74 +17,76 @@ class Polling5GEngine:
         self.chatid = os.getenv("TARGETCHATID")
         self.baseurl = f"https://api.telegram.org/bot{self.token}" if self.token else ""
         self.paystack_secret = os.getenv("PAYSTACK_SECRET_KEY")
-        
-        # Target recurring task feed or micro-gig board URL
         self.targeturl = os.getenv("TARGETTASKURL", "https://remoteok.com/remote-dev-jobs")
         self.sentcache = set()
 
     def validateenvironment(self) -> bool:
-        """Verifies mandatory GitHub Secrets exist before executing."""
-        if not self.token or not self.chatid:
-            logging.critical("❌ ERROR: TELEGRAMBOTTOKEN or TARGETCHATID missing from GitHub Secrets.")
+        if not self.token or not self.chatid or not self.paystack_secret:
+            logging.critical("❌ ERROR: TELEGRAMBOTTOKEN, TARGETCHATID, or PAYSTACK_SECRET_KEY missing from environment secrets.")
             return False
         return True
 
-    async def verify_paystack_payment(self, client: httpx.AsyncClient, reference: str) -> bool:
-        """Directly polls Paystack API to check if payment was completed successfully."""
-        if not self.paystack_secret:
-            logging.warning("⚠️ PAYSTACK_SECRET_KEY missing. Simulating verification pass for testing.")
-            return False # Set to True for dry runs if needed
+    async def initialize_paystack_transaction(self, client: httpx.AsyncClient, task_title: str) -> dict:
+        """Initializes a real transaction with Paystack to generate a valid checkout URL."""
+        url = "https://api.paystack.co/transaction/initialize"
+        headers = {
+            "Authorization": f"Bearer {self.paystack_secret}",
+            "Content-Type": "application/json"
+        }
+        # Amount in kobo (e.g., ₦1,000 = 100000 kobo)
+        payload = {
+            "email": "user@taskengine.internal",
+            "amount": 100000, 
+            "metadata": {"task_title": task_title}
+        }
+        try:
+            response = await client.post(url, json=payload, headers=headers, timeout=10.0)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status"):
+                    return {
+                        "authorization_url": data["data"]["authorization_url"],
+                        "reference": data["data"]["reference"]
+                    }
+        except httpx.RequestException as e:
+            logging.error(f"❌ Paystack Initialization Error: {e}")
+        return None
 
+    async def verify_paystack_payment(self, client: httpx.AsyncClient, reference: str) -> bool:
         url = f"https://api.paystack.co/transaction/verify/{reference}"
         headers = {"Authorization": f"Bearer {self.paystack_secret}"}
-        
         try:
             response = await client.get(url, headers=headers, timeout=10.0)
             if response.status_code == 200:
                 data = response.json()
-                status = data.get("data", {}).get("status")
-                if status == "success":
+                if data.get("data", {}).get("status") == "success":
                     return True
         except httpx.RequestException as e:
             logging.error(f"❌ Paystack Verification Network Error: {e}")
         return False
 
     async def execute_5g_fulfillment(self, task_data: dict):
-        """[5G Autonomous Execution] Triggered instantly once payment poll confirms success."""
         logging.info(f"⚡ [5G TRIGGERED] Executing automated fulfillment for: {task_data['title']}")
-        
         async with httpx.AsyncClient() as client:
             try:
-                # Add your fulfillment endpoint, API call, or automation sequence here
                 response = await client.post(
                     "https://httpbin.org/post",
                     json={"status": "fulfilled", "task_title": task_data['title']},
                     timeout=5.0
                 )
                 if response.status_code in [200, 201]:
-                    logging.info("🎯 5G Task Successfully Fulfilled & Settled via Direct Polling!")
+                    logging.info("🎯 5G Task Successfully Fulfilled & Settled!")
             except Exception as e:
                 logging.error(f"❌ 5G Fulfillment Error: {e}")
 
-    async def sendtelegramalert(self, client: httpx.AsyncClient, task_data: dict, reference: str) -> bool:
-        """Dispatches formatted HTML task alerts with a payment link."""
+    async def sendtelegramalert(self, client: httpx.AsyncClient, task_data: dict, payment_info: dict) -> bool:
         url = f"{self.baseurl}/sendMessage"
+        payment_link = payment_info["authorization_url"]
+        reference = payment_info["reference"]
         
-        # Generate a sample Paystack checkout or initialization link using the reference
-        # (Users can pay via standard Paystack payment link format or custom gateway)
-        payment_link = f"https://checkout.paystack.com/{reference}"
-
         inline_keyboard = {
-            "inline_keyboard": [
-                [
-                    {
-                        "text": "💳 PAY & UNLOCK VIA PAYSTACK", 
-                        "url": payment_link
-                    }
-                ]
-            ]
+            "inline_keyboard": [[{"text": "💳 PAY & UNLOCK VIA PAYSTACK", "url": payment_link}]]
         }
-
         payload = {
             "chat_id": str(self.chatid),
             "text": (
@@ -101,41 +102,32 @@ class Polling5GEngine:
             "disable_web_page_preview": True,
             "reply_markup": inline_keyboard
         }
-
         try:
             response = await client.post(url, json=payload, timeout=10.0)
             if response.status_code == 200:
-                logging.info("✅ Task alert with Paystack payment reference dispatched successfully.")
+                logging.info("✅ Task alert with verified Paystack checkout link dispatched.")
                 return True
         except httpx.RequestException as e:
             logging.error(f"❌ Dispatch Network Error: {e}")
         return False
 
     async def scantaskgaps(self, page) -> dict:
-        """Scans the board for fresh items."""
         try:
             await page.goto(self.targeturl, timeout=30000, wait_until="domcontentloaded")
             await asyncio.sleep(5.0)
-
             items = await page.locator("tr.job, .job-card, tr, article, div[data-id]").all()
-
             for item in items[:15]:
                 try:
                     text_content = await item.inner_text()
                     lines = [l.strip() for l in text_content.split("\n") if l.strip()]
-
                     if len(lines) < 1:
                         continue
-
                     title = lines[0]
                     if len(title) < 5 or "remote" in title.lower() and len(lines) == 1:
                         continue
-
                     taskid = "".join(filter(str.isalnum, title))[:35]
-
                     if taskid in self.sentcache:
                         continue
-
                     self.sentcache.add(taskid)
                     return {
                         "title": title,
@@ -145,51 +137,41 @@ class Polling5GEngine:
                     continue
         except Exception as e:
             logging.error(f"Task board scanning exception: {e}")
-
         return None
 
     async def executeengine(self):
-        """Main runner execution cycle with integrated payment polling."""
         logging.info("🚀 Polling 5G + Paystack Task Engine Initialized.")
-
         if not self.validateenvironment():
             return
-
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
                 args=["--no-sandbox", "--disable-dev-shm-usage"]
             )
-
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 viewport={"width": 1280, "height": 800}
             )
-
             page = await context.new_page()
-
             async with httpx.AsyncClient() as client:
                 opportunity = await self.scantaskgaps(page)
-
                 if opportunity:
-                    # Generate unique transaction reference for this signal
-                    ref = f"task_{int(time.time())}"
-                    
-                    if await self.sendtelegramalert(client, opportunity, ref):
+                    # 1. Initialize live transaction via Paystack API
+                    payment_info = await self.initialize_paystack_transaction(client, opportunity['title'])
+                    if payment_info and await self.sendtelegramalert(client, opportunity, payment_info):
+                        ref = payment_info["reference"]
                         logging.info(f"⏳ Polling Paystack for payment confirmation on ref: {ref}...")
-                        
-                        # Poll Paystack for up to 5 minutes (30 attempts * 10 seconds)
                         for attempt in range(30):
                             await asyncio.sleep(10.0)
                             is_paid = await self.verify_paystack_payment(client, ref)
-                            
                             if is_paid:
                                 logging.info("🎉 Payment verified successfully via polling loop!")
                                 await self.execute_5g_fulfillment(opportunity)
                                 break
                             else:
                                 logging.info(f"⏳ Attempt {attempt+1}/30: Payment pending...")
-
+                else:
+                    logging.info("⚠️ No live task snippet captured.")
             await browser.close()
 
 if __name__ == "__main__":
