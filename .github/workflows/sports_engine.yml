@@ -1,0 +1,32 @@
+name: Sports Value Engine
+
+on:
+  schedule:
+    - cron: '*/15 12-23 * * 6,7'  # Peak weekend match blocks
+  workflow_dispatch:
+
+jobs:
+  run-sports-engine:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright httpx
+          playwright install chromium --with-deps
+
+      - name: Execute Sports Value Engine
+        env:
+          TELEGRAMBOTTOKEN: ${{ secrets.TELEGRAMBOTTOKEN }}
+          TARGETCHATID: ${{ secrets.TARGETCHATID }}
+          BANKROLLPOOL: "20000"
+          MINODDSTHRESHOLD: "2.20"
+        run: python bot.py
