@@ -2,7 +2,6 @@ import os
 import asyncio
 import logging
 import httpx
-from playwright.async_api import async_playwright
 
 logging.basicConfig(
     level=logging.INFO,
@@ -10,169 +9,121 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 
-class DiagnosticArbitrageEngine:
+class InstantTaskEngine:
     def __init__(self):
         self.token = os.getenv("TELEGRAMBOTTOKEN")
         self.chatid = os.getenv("TARGETCHATID")
         self.baseurl = f"https://api.telegram.org/bot{self.token}" if self.token else ""
-        self.bankroll = float(os.getenv("BANKROLLPOOL", "20000"))
-        
-        self.bookmaker_a_url = os.getenv("BOOKMAKER_A_URL", "https://www.sportybet.com/ng/sport/football/live")
-        self.bookmaker_b_url = os.getenv("BOOKMAKER_B_URL", "https://www.bet9ja.com/sport/live")
+        self.paystack_secret = os.getenv("PAYSTACK_SECRET_KEY")
+        self.api_url = "https://remoteok.com/api"
         self.sentcache = set()
 
     def validateenvironment(self) -> bool:
-        if not self.token or not self.chatid:
-            logging.critical("❌ ERROR: TELEGRAMBOTTOKEN or TARGETCHATID missing from environment variables.")
+        if not self.token or not self.chatid or not self.paystack_secret:
+            logging.critical("❌ ERROR: TELEGRAMBOTTOKEN, TARGETCHATID, or PAYSTACK_SECRET_KEY missing.")
             return False
         return True
 
-    def round_to_nearest(self, n: int, base: int = 100) -> int:
-        return max(base, base * round(n / base))
-
-    async def send_telemetry(self, client: httpx.AsyncClient, message: str):
-        """Sends status telemetry to your Telegram monitor."""
-        if not self.baseurl:
-            return
-        url = f"{self.baseurl}/sendMessage"
+    async def initialize_paystack_transaction(self, client: httpx.AsyncClient, task_title: str) -> dict:
+        url = "https://api.paystack.co/transaction/initialize"
+        headers = {
+            "Authorization": f"Bearer {self.paystack_secret}",
+            "Content-Type": "application/json"
+        }
         payload = {
-            "chat_id": str(self.chatid),
-            "text": f"⚽ <b>SPORT ENGINE TELEMETRY</b>\n──────────────────────────────\n{message}",
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True
+            "email": "verification@taskengine.internal",
+            "amount": 250000,  # ₦2,500 access fee
+            "metadata": {"task_title": task_title}
         }
         try:
-            await client.post(url, json=payload, timeout=10.0)
-        except Exception as e:
-            logging.error(f"Telegram Telemetry Error: {e}")
+            response = await client.post(url, json=payload, headers=headers, timeout=10.0)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status"):
+                    return {
+                        "authorization_url": data["data"]["authorization_url"],
+                        "reference": data["data"]["reference"]
+                    }
+        except httpx.RequestException as e:
+            logging.error(f"❌ Paystack Init Error: {e}")
+        return None
 
-    async def scrape_bookmaker(self, page, url: str, bookmaker_name: str) -> dict:
-        odds_map = {}
+    async def send_telegram_alert(self, client: httpx.AsyncClient, task_data: dict, payment_info: dict) -> bool:
+        url = f"{self.baseurl}/sendMessage"
+        payment_link = payment_info["authorization_url"]
+        reference = payment_info["reference"]
+        
+        inline_keyboard = {
+            "inline_keyboard": [[{"text": "💳 PAY & UNLOCK GIG DETAILS (₦2,500)", "url": payment_link}]]
+        }
+        payload = {
+            "chat_id": str(self.chatid),
+            "text": (
+                f"🚀 <b>VERIFIED FREELANCE TASK SIGNAL</b> 🚀\n"
+                f"──────────────────────────────\n"
+                f"📌 <b>Position:</b> <code>{task_data['title']}</code>\n"
+                f"🏢 <b>Company:</b> {task_data['company']}\n"
+                f"💰 <b>Budget:</b> {task_data['compensation']}\n"
+                f"🔑 <b>Ref:</b> <code>{reference}</code>\n"
+                f"──────────────────────────────\n"
+                f"⚡ <i>Secure Paystack escrow gate active. Click to verify and unlock.</i>"
+            ),
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+            "reply_markup": inline_keyboard
+        }
         try:
-            logging.info(f"🌐 Connecting to {bookmaker_name}: {url}")
-            await page.goto(url, timeout=45000, wait_until="domcontentloaded")
-            await asyncio.sleep(10.0)  # Allow sockets & JS to load
+            response = await client.post(url, json=payload, timeout=10.0)
+            return response.status_code == 200
+        except httpx.RequestException as e:
+            logging.error(f"❌ Dispatch Error: {e}")
+        return False
+
+    async def fetch_latest_task(self, client: httpx.AsyncClient) -> dict:
+        """Fetches jobs instantly via RemoteOK JSON API with clean data extraction."""
+        try:
+            logging.info(f"⚡ Fetching live jobs via API: {self.api_url}")
+            headers = {"User-Agent": "Mozilla/5.0"}
+            response = await client.get(self.api_url, headers=headers, timeout=15.0)
             
-            # Scroll to trigger dynamic elements
-            await page.evaluate("window.scrollBy(0, 800)")
-            await asyncio.sleep(3.0)
-
-            # Save diagnostic snapshot for debugging if selectors fail
-            os.makedirs("debug_artifacts", exist_ok=True)
-            await page.screenshot(path=f"debug_artifacts/{bookmaker_name.lower().replace(' ', '_')}.png")
-
-            # Broad multi-selector search for match rows
-            selectors = [
-                ".match-row", ".af-match", "tr.match", 
-                "div[class*='match']", "div[class*='event']", 
-                "div[class*='game']", "article"
-            ]
-            
-            elements = []
-            for sel in selectors:
-                elements = await page.locator(sel).all()
-                if len(elements) > 2:
-                    logging.info(f"Found {len(elements)} nodes on {bookmaker_name} using selector: {sel}")
-                    break
-
-            for elem in elements[:40]:
-                try:
-                    text = await elem.inner_text()
-                    lines = [l.strip() for l in text.split("\n") if l.strip()]
+            if response.status_code == 200:
+                data = response.json()
+                jobs = [item for item in data if isinstance(item, dict) and "position" in item]
+                
+                for job in jobs[:10]:
+                    title = job.get("position", "Software Engineer")
+                    company = job.get("company", "Verified Partner")
+                    salary = job.get("salary_max", "")
                     
-                    if len(lines) < 2:
-                        continue
-
-                    team_one = lines[0].lower()
-                    team_two = lines[1].lower() if len(lines) > 1 else "unknown"
-                    fixture_key = "".join(filter(str.isalnum, f"{team_one}-{team_two}"))[:30]
+                    compensation = f"${salary:,} / year" if salary else "$3,500 – $7,000 / project"
                     
-                    if len(fixture_key) < 5:
+                    taskid = "".join(filter(str.isalnum, f"{title}-{company}"))[:35]
+                    if taskid in self.sentcache:
                         continue
-
-                    valid_odds = []
-                    for line in lines[2:]:
-                        try:
-                            val = float(line.replace(",", "."))
-                            if 1.05 <= val <= 40.0:
-                                valid_odds.append(val)
-                        except ValueError:
-                            continue
-
-                    if valid_odds:
-                        odds_map[fixture_key] = max(valid_odds)
-                except Exception:
-                    continue
-
+                    
+                    self.sentcache.add(taskid)
+                    return {
+                        "title": title,
+                        "company": company,
+                        "compensation": compensation
+                    }
         except Exception as e:
-            logging.error(f"❌ Scraping error on {bookmaker_name}: {e}")
-            
-        logging.info(f"📊 Extracted {len(odds_map)} valid fixtures from {bookmaker_name}.")
-        return odds_map
+            logging.error(f"❌ API fetching exception: {e}")
+        return None
 
     async def executeengine(self):
-        logging.info("🚀 Diagnostic Sport Arbitrage Engine Initialized.")
+        logging.info("🚀 Instant API Task Engine Initialized.")
         if not self.validateenvironment():
             return
 
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled"
-                ]
-            )
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                viewport={"width": 1440, "height": 900}
-            )
-            await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            page = await context.new_page()
-
-            async with httpx.AsyncClient() as client:
-                odds_a = await self.scrape_bookmaker(page, self.bookmaker_a_url, "Bookmaker A")
-                odds_b = await self.scrape_bookmaker(page, self.bookmaker_b_url, "Bookmaker B")
-
-                common_fixtures = set(odds_a.keys()).intersection(set(odds_b.keys()))
-                logging.info(f"🔍 Cross-matched {len(common_fixtures)} live common fixtures.")
-
-                if len(odds_a) == 0 or len(odds_b) == 0:
-                    await self.send_telemetry(client, "⚠️ <b>Warning:</b> Sport engine captured 0 odds. Bookmaker DOM structures or anti-bot firewalls may have changed.")
-
-                signal_found = False
-                for fix in common_fixtures:
-                    o_a = odds_a[fix]
-                    o_b = odds_b[fix]
-
-                    implied_probability_sum = (1.0 / o_a) + (1.0 / o_b)
-                    
-                    if implied_probability_sum < 0.99:
-                        signal_found = True
-                        roi = round((1.0 - implied_probability_sum) * 100, 2)
-                        
-                        if fix in self.sentcache:
-                            continue
-                        self.sentcache.add(fix)
-                        
-                        stake_a = self.round_to_nearest(int(self.bankroll * ((1.0 / o_a) / implied_probability_sum)))
-                        stake_b = self.round_to_nearest(int(self.bankroll * ((1.0 / o_b) / implied_probability_sum)))
-
-                        alert_text = (
-                            f"⚖️ <b>ARBITRAGE OPPORTUNITY DETECTED</b>\n"
-                            f"──────────────────────────────\n"
-                            f"🏆 <b>Fixture:</b> {fix}\n"
-                            f"📈 <b>Odds A:</b> {o_a} | <b>Stake:</b> ₦{stake_a}\n"
-                            f"📈 <b>Odds B:</b> {o_b} | <b>Stake:</b> ₦{stake_b}\n"
-                            f"💰 <b>Guaranteed ROI:</b> +{roi}%"
-                        )
-                        await self.send_telemetry(client, alert_text)
-
-                if not signal_found:
-                    logging.info("ℹ️ Scan complete. No profitable arbitrage spreads (< 0.99) found in current live feed.")
-
-            await browser.close()
+        async with httpx.AsyncClient() as client:
+            opportunity = await self.fetch_latest_task(client)
+            if opportunity:
+                payment_info = await self.initialize_paystack_transaction(client, opportunity['title'])
+                if payment_info and await self.send_telegram_alert(client, opportunity, payment_info):
+                    logging.info("✅ Professional task signal dispatched successfully.")
+            else:
+                logging.info("⚠️ No new task captured from API feed.")
 
 if __name__ == "__main__":
-    asyncio.run(DiagnosticArbitrageEngine().executeengine())
+    asyncio.run(InstantTaskEngine().executeengine())
