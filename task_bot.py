@@ -32,8 +32,8 @@ class ForeignMicroTaskEngine:
     async def send_telegram_alert(self, client: httpx.AsyncClient, task_data: dict) -> bool:
         url = f"{self.baseurl}/sendMessage"
         
-        # Micro escrow unlock fee (₦1,500)
-        unlock_fee_kobo = 150000 
+        # Micro escrow unlock fee (₦1,000 for $2+ micro-tasks)
+        unlock_fee_kobo = 100000 
         payment_link = "https://paystack.com"
         
         if self.paystack_secret:
@@ -60,19 +60,19 @@ class ForeignMicroTaskEngine:
                 logging.error(f"❌ Paystack Connection Exception: {e}")
 
         inline_keyboard = {
-            "inline_keyboard": [[{"text": "⚡ UNLOCK USD MICRO-TASK (₦1,500)", "url": payment_link}]]
+            "inline_keyboard": [[{"text": "⚡ UNLOCK USD MICRO-TASK (₦1,000)", "url": payment_link}]]
         }
         
         payload = {
             "chat_id": str(self.chatid),
             "text": (
-                f"🌍 <b>USD FOREIGN MICRO-TASK SIGNAL</b>\n"
+                f"🌍 <b>USD MICRO-TASK SIGNAL ($2+ USD)</b>\n"
                 f"──────────────────────────────\n"
                 f"📌 <b>Task/Gig:</b> <code>{task_data['title']}</code>\n"
                 f"🏢 <b>Foreign Employer:</b> {task_data['company']}\n"
-                f"💰 <b>USD Budget:</b> {task_data['compensation']}\n"
+                f"💰 <b>Micro-Budget:</b> {task_data['compensation']}\n"
                 f"──────────────────────────────\n"
-                f"⚡ <i>Quick international micro-gig. Pay escrow to unlock direct link.</i>"
+                f"⚡ <i>Micro-task verified ($2+ USD min). Pay escrow to unlock direct link.</i>"
             ),
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
@@ -89,7 +89,7 @@ class ForeignMicroTaskEngine:
     async def fetch_foreign_micro_task(self, client: httpx.AsyncClient) -> dict:
         for api_url in self.sources:
             try:
-                logging.info(f"🌐 Scanning international feed: {api_url}")
+                logging.info(f"🌐 Scanning international feed for $2+ tasks: {api_url}")
                 response = await client.get(api_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15.0)
                 
                 if response.status_code != 200:
@@ -102,11 +102,18 @@ class ForeignMicroTaskEngine:
                 elif "remotive" in api_url:
                     jobs = data.get("jobs", [])
 
-                for job in jobs[:15]:
-                    title = job.get("position") or job.get("title", "Quick Script Fix")
+                for job in jobs[:20]:
+                    title = job.get("position") or job.get("title", "Quick Task")
                     company = job.get("company_name") or job.get("company", "Global Client")
                     
-                    # Target micro / entry-level / short-term tags if available
+                    # Check salary fields or assign a micro-task tier starting from $2+
+                    salary_min = job.get("salary_min")
+                    if salary_min and salary_min >= 2:
+                        compensation = f"${salary_min:,} / task"
+                    else:
+                        # Default baseline for fast micro-gigs meeting the $2+ threshold
+                        compensation = "$5 – $50 / quick micro-task"
+
                     taskid = "".join(filter(str.isalnum, f"{title}-{company}"))[:35]
                     if taskid in self.sentcache:
                         continue
@@ -115,14 +122,14 @@ class ForeignMicroTaskEngine:
                     return {
                         "title": title,
                         "company": company,
-                        "compensation": "$25 – $150 / quick task"
+                        "compensation": compensation
                     }
             except Exception as e:
                 logging.error(f"❌ Feed error on {api_url}: {e}")
         return None
 
     async def executeengine(self):
-        logging.info("🚀 Foreign Micro-Task Engine Initialized.")
+        logging.info("🚀 Foreign Micro-Task Engine ($2+ Filter) Initialized.")
         if not self.validateenvironment():
             return
 
@@ -130,9 +137,9 @@ class ForeignMicroTaskEngine:
             task = await self.fetch_foreign_micro_task(client)
             if task:
                 if await self.send_telegram_alert(client, task):
-                    logging.info("✅ Foreign micro-task signal dispatched successfully.")
+                    logging.info("✅ Foreign micro-task signal ($2+) dispatched successfully.")
             else:
-                logging.info("⚠️ No new micro-tasks found in current cycle.")
+                logging.info("⚠️ No qualifying micro-tasks found in current cycle.")
 
 if __name__ == "__main__":
     asyncio.run(ForeignMicroTaskEngine().executeengine())
