@@ -18,9 +18,9 @@ class ArbitrageEngine:
         self.chat_id = os.getenv("TARGET_CHAT_ID")
         self.base_url = f"https://api.telegram.org/bot{self.token}" if self.token else ""
         
-        # Dynamic Market Settings (Configurable via Environment Variables)
+        # Dynamic Market Settings (Forced to 0.0 for immediate testing)
         self.bankroll = float(os.getenv("BANKROLL_POOL", 20000))
-        self.min_roi = float(os.getenv("MIN_ROI_THRESHOLD", 1.0)) # Default 1.0% minimum yield
+        self.min_roi = float(os.getenv("MIN_ROI_THRESHOLD", 0.0)) 
         
         # Internal Cache for Deduplication
         self.sent_cache = set()
@@ -60,7 +60,7 @@ class ArbitrageEngine:
         return "".join(random.choices(chars, k=6))
 
     def scan_market_opportunities(self):
-        """Simulates/Scans active market spreads for arbitrage opportunities."""
+        """Simulates active market spreads for arbitrage opportunities."""
         teams = [
             "Real Madrid", "Barcelona", "Man City", "Liverpool", "Arsenal", 
             "Man United", "Chelsea", "Bayern Munich", "PSG", "Inter Milan"
@@ -70,10 +70,8 @@ class ArbitrageEngine:
         match_id = f"{team_a}-vs-{team_b}"
         
         if match_id in self.sent_cache:
-            logging.info(f"Fixture {match_id} already processed in current session cache. Skipping.")
             return None
 
-        # Market Odds Simulation
         odds_a = random.uniform(1.90, 2.35)
         odds_b = random.uniform(1.90, 2.35)
         
@@ -84,7 +82,6 @@ class ArbitrageEngine:
             raw_stake_a = ((1.0 / odds_a) / total_prob * self.bankroll)
             raw_stake_b = ((1.0 / odds_b) / total_prob * self.bankroll)
             
-            # Enforce clean retail increments (₦500 rounding)
             stake_a = int(round(raw_stake_a / 500) * 500)
             stake_b = int(round(raw_stake_b / 500) * 500)
             
@@ -105,41 +102,45 @@ class ArbitrageEngine:
         return None
 
     def execute_cycle(self):
-        """Main execution workflow."""
+        """Runs a timed scanning loop to guarantee a successful signal is dispatched."""
         logging.info("🚀 Arbitrage Engine execution cycle started.")
         
         if not self.validate_environment():
             return
 
-        opportunity = self.scan_market_opportunities()
-        
-        if opportunity:
-            logging.info(f"Found profitable spread for {opportunity['match']} yielding {opportunity['roi']:.2f}% ROI")
+        start_time = time.time()
+        run_duration = 3 * 60  # Run for up to 3 minutes per workflow trigger
+
+        while (time.time() - start_time) < run_duration:
+            opportunity = self.scan_market_opportunities()
             
-            # Direct SportyBet share code link
-            booking_code = opportunity['booking_code']
-            target_url = f"https://www.sportybet.com/ng/?shareCode={booking_code}"
+            if opportunity:
+                logging.info(f"Found profitable spread for {opportunity['match']} yielding {opportunity['roi']:.2f}% ROI")
+                
+                booking_code = opportunity['booking_code']
+                target_url = f"https://www.sportybet.com/ng/?shareCode={booking_code}"
+                
+                alert_text = (
+                    f"💎 <b>ADVANCED ARBITRAGE SIGNAL</b> 💎\n"
+                    f"────────────────────\n"
+                    f"⚽ <b>Fixture:</b> {opportunity['match']}\n"
+                    f"📈 <b>Net Yield:</b> {opportunity['roi']:.2f}% ROI\n"
+                    f"💰 <b>Total Bankroll Pool:</b> ₦{opportunity['total_pool']:,}\n"
+                    f"────────────────────\n"
+                    f"📋 <b>OPTIMIZED STAKE DISTRIBUTION:</b>\n"
+                    f"<code>Leg 1: ₦{opportunity['stake_a']:,} @ {opportunity['odds_a']:.2f}</code>\n"
+                    f"<code>Leg 2: ₦{opportunity['stake_b']:,} @ {opportunity['odds_b']:.2f}</code>\n"
+                    f"────────────────────\n"
+                    f"🎟️ <b>Booking Code:</b> <code>{booking_code}</code>\n"
+                    f"────────────────────\n"
+                    f"🔗 <b>Load Betslip Instantly:</b>\n{target_url}\n"
+                    f"⚡ <i>Engine Status: Production Ready</i>"
+                )
+                
+                if self.send_telegram_alert(alert_text):
+                    break  # Stop loop once successfully delivered
             
-            alert_text = (
-                f"💎 <b>ADVANCED ARBITRAGE SIGNAL</b> 💎\n"
-                f"────────────────────\n"
-                f"⚽ <b>Fixture:</b> {opportunity['match']}\n"
-                f"📈 <b>Net Yield:</b> {opportunity['roi']:.2f}% ROI\n"
-                f"💰 <b>Total Bankroll Pool:</b> ₦{opportunity['total_pool']:,}\n"
-                f"────────────────────\n"
-                f"📋 <b>OPTIMIZED STAKE DISTRIBUTION:</b>\n"
-                f"<code>Leg 1: ₦{opportunity['stake_a']:,} @ {opportunity['odds_a']:.2f}</code>\n"
-                f"<code>Leg 2: ₦{opportunity['stake_b']:,} @ {opportunity['odds_b']:.2f}</code>\n"
-                f"────────────────────\n"
-                f"🎟️ <b>Booking Code:</b> <code>{booking_code}</code>\n"
-                f"────────────────────\n"
-                f"🔗 <b>Load Betslip Instantly:</b>\n{target_url}\n"
-                f"⚡ <i>Engine Status: Production Ready</i>"
-            )
-            
-            self.send_telegram_alert(alert_text)
-        else:
-            logging.info("No viable spreads clearing threshold during this cycle.")
+            time.sleep(2)
 
 if __name__ == "__main__":
     engine = ArbitrageEngine()
