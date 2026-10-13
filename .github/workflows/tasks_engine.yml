@@ -1,3 +1,28 @@
+name: Global Task Gap Engine
+
+on:
+  schedule:
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
+
+jobs:
+  run-task-engine:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright httpx
+          playwright install chromium --with-deps
+
       - name: Send Telegram Diagnostic Ping
         env:
           TOKEN: ${{ secrets.TELEGRAMBOTTOKEN }}
