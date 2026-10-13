@@ -12,17 +12,15 @@ LIVE_PUBLIC_API = "https://sportybet.com"
 HEADERS = {"User-Agent": "Mozilla/5.0 (Linux; Android 13; K) AppleWebKit/537.36 Mobile Safari/537.36"}
 
 def run_fully_automated_scanner():
-    """Runs data checks, enforces 3%+ ROI, and prints code slips instantly."""
+    """Runs data checks, enforces test threshold, and prints slips instantly."""
     target_bankroll = 20000 
     
     # Secure high-profile teams to maintain our SportyBet Anti-Ban protocol
     teams = ["Real Madrid", "Barcelona", "Man City", "Liverpool", "Arsenal", "Man United", "Chelsea", "Bayern Munich", "PSG", "Inter Milan"]
     markets = ["1X2 vs Double Chance", "Over/Under 2.5 Goals", "Both Teams to Score (BTTS)"]
     
-    # The automation engine will run intensive scans for 10 minutes per cron-trigger,
-    # mapping live ticks rapidly before closing out the container smoothly.
     start_run = time.time()
-    run_duration = 10 * 60  # 10 Minutes
+    run_duration = 5 * 60  # Shortened to 5 minutes for quick initial testing
 
     while (time.time() - start_run) < run_duration:
         try:
@@ -40,8 +38,8 @@ def run_fully_automated_scanner():
             total_prob = (1.0 / odds_a) + (1.0 / odds_b)
             roi = ((1.0 / total_prob) - 1.0) * 100
 
-            # 📈 3%+ ROI Stabilized Arbitrage Threshold
-            if roi >= 3.0:
+            # ⚙️ TEMPORARY TEST OVERRIDE: Set to 0.0 to guarantee an instant push notification
+            if roi >= 0.0:
                 # Enforce clean ₦500 whole-number retail stakes to bypass bot flags
                 raw_stake_a = ((1.0 / odds_a) / total_prob * target_bankroll)
                 raw_stake_b = ((1.0 / odds_b) / total_prob * target_bankroll)
@@ -55,7 +53,7 @@ def run_fully_automated_scanner():
                 search_url = f"https://sportybet.com{match_name.replace(' ', '%20')}"
                 
                 mobile_slip = (
-                    f"🛡️ <b>AUTOMATED 3%+ STREAM ALIVE</b> 🛡️\n"
+                    f"🛡️ <b>SPORTYBET PIPELINE TEST SUCCESSFUL</b> 🛡️\n"
                     f"────────────────────\n"
                     f"⚽ <b>Match:</b> {match_name}\n"
                     f"📊 <b>Market:</b> {market_type}\n"
@@ -67,14 +65,17 @@ def run_fully_automated_scanner():
                     f"<code>Bet 2: ₦{stake_b:,} @ {odds_b:.2f}</code>\n"
                     f"────────────────────\n"
                     f"🔗 <b>SportyBet Mobile Web:</b>\n{search_url}\n"
-                    f"🤖 <i>100% Fully Automated System Loop. No human action required.</i>"
+                    f"✅ <i>The cloud connection to your phone is fully working!</i>"
                 )
                 requests.post(f"{BASE_TELEGRAM_URL}/sendMessage", json={"chat_id": str(TARGET_CHAT_ID), "text": mobile_slip, "parse_mode": "HTML"})
-            
-            time.sleep(5)  # Quick 5-second parsing interval ticks
-        except Exception:
+                print(f"🎉 Success packet delivered for {match_name}")
+                break  # Stops the test script cleanly once the first confirmation arrives
+                
+            time.sleep(2)
+        except Exception as e:
+            print(f"Buffer slip hold: {e}")
             time.sleep(5)
 
 if __name__ == "__main__":
-    print("🚀 Fully Automated Cloud Session Ignited...")
+    print("🚀 Test Cloud Session Ignited...")
     run_fully_automated_scanner()
