@@ -1,32 +1,76 @@
+
 name: Global Task Gap Engine
 
 on:
   push:
-    branches: [ "main" ]
+    branches:
+      - main
   schedule:
-    - cron: '*/15 * * * *'   # Runs every 15 minutes, 24/7
+    - cron: "*/15 * * * *"
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: global-task-gap-engine-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   run-task-engine:
+    name: Run Global Task Scanner
     runs-on: ubuntu-latest
+    timeout-minutes: 12
+
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      TELEGRAMBOTTOKEN: ${{ secrets.TELEGRAMBOTTOKEN }}
+      TARGETCHATID: ${{ secrets.TARGETCHATID }}
+      PAYSTACK_SECRET_KEY: ${{ secrets.PAYSTACK_SECRET_KEY }}
+
     steps:
-      - name: Checkout Code
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+          cache: pip
 
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install httpx
+          python -m pip install httpx
+
+      - name: Validate Required Configuration
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+
+          required = (
+              "TELEGRAMBOTTOKEN",
+              "TARGETCHATID",
+              "PAYSTACK_SECRET_KEY",
+          )
+
+          missing = [
+              name for name in required
+              if not os.environ.get(name, "").strip()
+          ]
+
+          if missing:
+              print(
+                  "Missing required GitHub Actions secrets: "
+                  + ", ".join(missing)
+              )
+              sys.exit(1)
+
+          print("Required configuration is present.")
+          print("Secret values will not be displayed.")
+          PY
 
       - name: Execute Global Task Engine
-        env:
-          TELEGRAMBOTTOKEN: ${{ secrets.TELEGRAMBOTTOKEN }}
-          TARGETCHATID: ${{ secrets.TARGETCHATID }}
-          PAYSTACK_SECRET_KEY: ${{ secrets.PAYSTACK_SECRET_KEY }}
         run: python task_bot.py
