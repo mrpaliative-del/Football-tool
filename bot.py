@@ -23,7 +23,6 @@ class QuantitativeValueEngine:
         except (ValueError, TypeError):
             self.bankroll = 20000.0
 
-        # Minimum decimal odds threshold for high-value comeback/momentum plays
         try:
             self.minodds = float(os.getenv("MINODDSTHRESHOLD", 2.20))
         except (ValueError, TypeError):
@@ -59,19 +58,26 @@ class QuantitativeValueEngine:
         return False
 
     async def scanquantvalue(self, page) -> dict:
-        """Scans live matches for delayed momentum pricing on high-value selections."""
+        """Scans live matches for delayed momentum pricing while ignoring UI timers."""
         try:
             await page.goto(self.targeturl, timeout=30000, wait_until="domcontentloaded")
             await asyncio.sleep(5.0)
 
             elements = await page.locator("div[class*='event'], tr, .match-card").all()
 
-            for elem in elements[:12]:
+            for elem in elements[:15]:
                 try:
                     text_content = await elem.inner_text()
-                    lines = [l.strip() for l in text_content.split("\n") if l.strip()]
+                    raw_lines = [l.strip() for l in text_content.split("\n") if l.strip()]
 
-                    if len(lines) < 4:
+                    # Filter out match clocks, timestamps, scores, and random metadata
+                    lines = []
+                    for token in raw_lines:
+                        if ":" in token or "'" in token or token.isdigit() or len(token) <= 2:
+                            continue
+                        lines.append(token)
+
+                    if len(lines) < 2:
                         continue
 
                     home = lines[0]
@@ -84,20 +90,18 @@ class QuantitativeValueEngine:
 
                     # Extract valid decimal odds tokens
                     odds_tokens = []
-                    for token in lines:
+                    for token in raw_lines:
                         try:
                             val = float(token)
-                            if 2.0 <= val <= 15.0:  # Targeting value/underdog/comeback territory
+                            if 2.0 <= val <= 15.0:  # Value / comeback territory
                                 odds_tokens.append(val)
                         except ValueError:
                             continue
 
-                    # Isolate highest mispriced value leg representing potential momentum shift
                     if odds_tokens:
                         selected_odds = max(odds_tokens)
                         
                         if selected_odds >= self.minodds:
-                            # Calculate clean retail stake (e.g., 5% of bankroll pool)
                             rawstake = self.bankroll * 0.05
                             stake = int(round(rawstake / 500) * 500)
                             if stake < 500:
