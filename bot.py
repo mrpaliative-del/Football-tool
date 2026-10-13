@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+import time
 import httpx
 from playwright.async_api import async_playwright
 
@@ -10,7 +11,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 
-class TelemetryArbitrageEngine:
+class ContinuousArbitrageEngine:
     def __init__(self):
         self.token = os.getenv("TELEGRAMBOTTOKEN")
         self.chatid = os.getenv("TARGETCHATID")
@@ -31,9 +32,7 @@ class TelemetryArbitrageEngine:
         return max(base, base * round(n / base))
 
     async def send_telemetry(self, client: httpx.AsyncClient, message: str):
-        """Dispatches guaranteed telemetry updates to your Telegram monitor."""
         if not self.baseurl:
-            logging.error("❌ Telegram base URL not set; check token.")
             return
         url = f"{self.baseurl}/sendMessage"
         payload = {
@@ -43,26 +42,17 @@ class TelemetryArbitrageEngine:
             "disable_web_page_preview": True
         }
         try:
-            response = await client.post(url, json=payload, timeout=10.0)
-            if response.status_code == 200:
-                logging.info("✅ Telemetry successfully sent to Telegram.")
-            else:
-                logging.error(f"❌ Telegram API Error: {response.text}")
+            await client.post(url, json=payload, timeout=10.0)
         except Exception as e:
-            logging.error(f"❌ Telegram Telemetry Exception: {e}")
+            logging.error(f"Telegram Telemetry Error: {e}")
 
     async def scrape_bookmaker(self, page, url: str, bookmaker_name: str) -> dict:
         odds_map = {}
         try:
-            logging.info(f"🌐 Connecting to {bookmaker_name}: {url}")
-            await page.goto(url, timeout=45000, wait_until="domcontentloaded")
-            await asyncio.sleep(10.0)
-            
-            await page.evaluate("window.scrollBy(0, 800)")
-            await asyncio.sleep(3.0)
-
-            os.makedirs("debug_artifacts", exist_ok=True)
-            await page.screenshot(path=f"debug_artifacts/{bookmaker_name.lower().replace(' ', '_')}.png")
+            # Quick check if page needs navigation or direct scan
+            if page.url != url:
+                await page.goto(url, timeout=45000, wait_until="domcontentloaded")
+                await asyncio.sleep(5.0)
 
             selectors = [
                 ".match-row", ".af-match", "tr.match", 
@@ -74,7 +64,6 @@ class TelemetryArbitrageEngine:
             for sel in selectors:
                 elements = await page.locator(sel).all()
                 if len(elements) > 2:
-                    logging.info(f"Found {len(elements)} nodes on {bookmaker_name} using selector: {sel}")
                     break
 
             for elem in elements[:40]:
@@ -109,76 +98,75 @@ class TelemetryArbitrageEngine:
         except Exception as e:
             logging.error(f"❌ Scraping error on {bookmaker_name}: {e}")
             
-        logging.info(f"📊 Extracted {len(odds_map)} valid fixtures from {bookmaker_name}.")
         return odds_map
 
     async def executeengine(self):
-        logging.info("🚀 Telemetry Sport Arbitrage Engine Initialized.")
+        logging.info("🚀 High-Frequency Arbitrage Daemon Starting...")
         if not self.validateenvironment():
             return
+
+        # Run high-frequency loop for 10 minutes (600 seconds) per workflow trigger
+        RUN_DURATION = 600  
+        POLL_INTERVAL = 5.0  # 5-second scanning interval
+        start_time = time.time()
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled"
-                ]
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"]
             )
             context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 viewport={"width": 1440, "height": 900}
             )
-            await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            page = await context.new_page()
+            page_a = await context.new_page()
+            page_b = await context.new_page()
 
             async with httpx.AsyncClient() as client:
-                odds_a = await self.scrape_bookmaker(page, self.bookmaker_a_url, "SportyBet")
-                odds_b = await self.scrape_bookmaker(page, self.bookmaker_b_url, "Bet9ja")
+                await self.send_telemetry(client, "⚡ <b>High-Frequency Arbitrage Loop Started</b>\nScanning live markets every 5 seconds...")
 
-                common_fixtures = set(odds_a.keys()).intersection(set(odds_b.keys()))
-                logging.info(f"🔍 Cross-matched {len(common_fixtures)} live common fixtures.")
+                scan_count = 0
+                while (time.time() - start_time) < RUN_DURATION:
+                    scan_count += 1
+                    logging.info(f"🔄 Scan Cycle #{scan_count}")
 
-                signal_found = False
-                for fix in common_fixtures:
-                    o_a = odds_a[fix]
-                    o_b = odds_b[fix]
+                    odds_a, odds_b = await asyncio.gather(
+                        self.scrape_bookmaker(page_a, self.bookmaker_a_url, "SportyBet"),
+                        self.scrape_bookmaker(page_b, self.bookmaker_b_url, "Bet9ja")
+                    )
 
-                    implied_probability_sum = (1.0 / o_a) + (1.0 / o_b)
-                    
-                    if implied_probability_sum < 0.99:
-                        signal_found = True
-                        roi = round((1.0 - implied_probability_sum) * 100, 2)
-                        
-                        if fix in self.sentcache:
-                            continue
-                        self.sentcache.add(fix)
-                        
-                        stake_a = self.round_to_nearest(int(self.bankroll * ((1.0 / o_a) / implied_probability_sum)))
-                        stake_b = self.round_to_nearest(int(self.bankroll * ((1.0 / o_b) / implied_probability_sum)))
+                    common_fixtures = set(odds_a.keys()).intersection(set(odds_b.keys()))
 
-                        alert_text = (
-                            f"⚖️ <b>ARBITRAGE OPPORTUNITY DETECTED</b>\n"
-                            f"──────────────────────────────\n"
-                            f"🏆 <b>Fixture:</b> {fix}\n"
-                            f"📈 <b>Odds A:</b> {o_a} | <b>Stake:</b> ₦{stake_a}\n"
-                            f"📈 <b>Odds B:</b> {o_b} | <b>Stake:</b> ₦{stake_b}\n"
-                            f"💰 <b>Guaranteed ROI:</b> +{roi}%"
-                        )
-                        await self.send_telemetry(client, alert_text)
+                    for fix in common_fixtures:
+                        o_a, o_b = odds_a[fix], odds_b[fix]
+                        implied_prob = (1.0 / o_a) + (1.0 / o_b)
 
-                # GUARANTEED TELEMETRY REPORT ON EVERY RUN
-                summary_msg = (
-                    f"📊 <b>Execution Cycle Complete</b>\n"
-                    f"• SportyBet Scraped: <b>{len(odds_a)} fixtures</b>\n"
-                    f"• Bet9ja Scraped: <b>{len(odds_b)} fixtures</b>\n"
-                    f"• Overlapping Matches: <b>{len(common_fixtures)}</b>\n"
-                    f"• Arbitrage Signals Sent: <b>{'Yes' if signal_found else 'None (Market Balanced)'}</b>"
-                )
-                await self.send_telemetry(client, summary_msg)
+                        if implied_prob < 0.99:
+                            roi = round((1.0 - implied_prob) * 100, 2)
+                            cache_key = f"{fix}_{o_a}_{o_b}"
+                            
+                            if cache_key in self.sentcache:
+                                continue
+                            self.sentcache.add(cache_key)
+
+                            stake_a = self.round_to_nearest(int(self.bankroll * ((1.0 / o_a) / implied_prob)))
+                            stake_b = self.round_to_nearest(int(self.bankroll * ((1.0 / o_b) / implied_prob)))
+
+                            alert_text = (
+                                f"🚨 <b>INSTANT ARBITRAGE SIGNAL DETECTED</b>\n"
+                                f"──────────────────────────────\n"
+                                f"🏆 <b>Fixture:</b> {fix}\n"
+                                f"📈 <b>SportyBet:</b> {o_a} | <b>Stake:</b> ₦{stake_a}\n"
+                                f"📈 <b>Bet9ja:</b> {o_b} | <b>Stake:</b> ₦{stake_b}\n"
+                                f"💰 <b>Guaranteed ROI:</b> +{roi}%"
+                            )
+                            await self.send_telemetry(client, alert_text)
+
+                    await asyncio.sleep(POLL_INTERVAL)
+
+                await self.send_telemetry(client, f"🏁 <b>Session Complete</b>\nPerformed {scan_count} high-frequency scans.")
 
             await browser.close()
 
 if __name__ == "__main__":
-    asyncio.run(TelemetryArbitrageEngine().executeengine())
+    asyncio.run(ContinuousArbitrageEngine().executeengine())
