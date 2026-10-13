@@ -1,11 +1,11 @@
-name: Production Arbitrage Engine
+name: Production Playwright Arbitrage Engine
 
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:  # Allows manual triggers from GitHub Mobile/Web
-  repository_dispatch:  # Allows instant triggering via external webhooks
-    types: [trigger-arbitrage]
+  workflow_dispatch:
+  schedule:
+    - cron: '*/15 * * * *'
 
 jobs:
   run-arbitrage:
@@ -20,10 +20,12 @@ jobs:
           python-version: '3.10'
 
       - name: Install Dependencies
-        run: pip install httpx
+        run: |
+          pip install playwright httpx
+          playwright install chromium --with-deps
 
-      - name: Run Arbitrage Core Engine
+      - name: Run Live Playwright Engine
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TARGET_CHAT_ID: ${{ secrets.TARGET_CHAT_ID }}
+          TELEGRAMBOTTOKEN: ${{ secrets.TELEGRAMBOTTOKEN }}
+          TARGETCHATID: ${{ secrets.TARGETCHATID }}
         run: python bot.py
