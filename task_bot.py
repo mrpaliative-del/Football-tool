@@ -1,7 +1,6 @@
 import os
 import asyncio
 import logging
-import time
 import httpx
 from playwright.async_api import async_playwright
 
@@ -11,168 +10,169 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 
-class Polling5GEngine:
+class DiagnosticArbitrageEngine:
     def __init__(self):
         self.token = os.getenv("TELEGRAMBOTTOKEN")
         self.chatid = os.getenv("TARGETCHATID")
         self.baseurl = f"https://api.telegram.org/bot{self.token}" if self.token else ""
-        self.paystack_secret = os.getenv("PAYSTACK_SECRET_KEY")
-        self.targeturl = os.getenv("TARGETTASKURL", "https://remoteok.com/remote-dev-jobs")
+        self.bankroll = float(os.getenv("BANKROLLPOOL", "20000"))
+        
+        self.bookmaker_a_url = os.getenv("BOOKMAKER_A_URL", "https://www.sportybet.com/ng/sport/football/live")
+        self.bookmaker_b_url = os.getenv("BOOKMAKER_B_URL", "https://www.bet9ja.com/sport/live")
         self.sentcache = set()
 
     def validateenvironment(self) -> bool:
-        if not self.token or not self.chatid or not self.paystack_secret:
-            logging.critical("❌ ERROR: TELEGRAMBOTTOKEN, TARGETCHATID, or PAYSTACK_SECRET_KEY missing from environment secrets.")
+        if not self.token or not self.chatid:
+            logging.critical("❌ ERROR: TELEGRAMBOTTOKEN or TARGETCHATID missing from environment variables.")
             return False
         return True
 
-    async def initialize_paystack_transaction(self, client: httpx.AsyncClient, task_title: str) -> dict:
-        """Initializes a real transaction with Paystack to generate a valid checkout URL."""
-        url = "https://api.paystack.co/transaction/initialize"
-        headers = {
-            "Authorization": f"Bearer {self.paystack_secret}",
-            "Content-Type": "application/json"
-        }
-        # Amount in kobo (e.g., ₦1,000 = 100000 kobo)
-        payload = {
-            "email": "user@taskengine.internal",
-            "amount": 100000, 
-            "metadata": {"task_title": task_title}
-        }
-        try:
-            response = await client.post(url, json=payload, headers=headers, timeout=10.0)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("status"):
-                    return {
-                        "authorization_url": data["data"]["authorization_url"],
-                        "reference": data["data"]["reference"]
-                    }
-        except httpx.RequestException as e:
-            logging.error(f"❌ Paystack Initialization Error: {e}")
-        return None
+    def round_to_nearest(self, n: int, base: int = 100) -> int:
+        return max(base, base * round(n / base))
 
-    async def verify_paystack_payment(self, client: httpx.AsyncClient, reference: str) -> bool:
-        url = f"https://api.paystack.co/transaction/verify/{reference}"
-        headers = {"Authorization": f"Bearer {self.paystack_secret}"}
-        try:
-            response = await client.get(url, headers=headers, timeout=10.0)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("data", {}).get("status") == "success":
-                    return True
-        except httpx.RequestException as e:
-            logging.error(f"❌ Paystack Verification Network Error: {e}")
-        return False
-
-    async def execute_5g_fulfillment(self, task_data: dict):
-        logging.info(f"⚡ [5G TRIGGERED] Executing automated fulfillment for: {task_data['title']}")
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.post(
-                    "https://httpbin.org/post",
-                    json={"status": "fulfilled", "task_title": task_data['title']},
-                    timeout=5.0
-                )
-                if response.status_code in [200, 201]:
-                    logging.info("🎯 5G Task Successfully Fulfilled & Settled!")
-            except Exception as e:
-                logging.error(f"❌ 5G Fulfillment Error: {e}")
-
-    async def sendtelegramalert(self, client: httpx.AsyncClient, task_data: dict, payment_info: dict) -> bool:
+    async def send_telemetry(self, client: httpx.AsyncClient, message: str):
+        """Sends status telemetry to your Telegram monitor."""
+        if not self.baseurl:
+            return
         url = f"{self.baseurl}/sendMessage"
-        payment_link = payment_info["authorization_url"]
-        reference = payment_info["reference"]
-        
-        inline_keyboard = {
-            "inline_keyboard": [[{"text": "💳 PAY & UNLOCK VIA PAYSTACK", "url": payment_link}]]
-        }
         payload = {
             "chat_id": str(self.chatid),
-            "text": (
-                f"🔄 <b>RECURRING TASK SIGNAL + PAYSTACK</b> 🔄\n"
-                f"────────────────────\n"
-                f"📌 <b>Task/Gig:</b> {task_data['title']}\n"
-                f"📝 <b>Summary:</b> {task_data['snippet']}\n"
-                f"🔑 <b>Ref:</b> <code>{reference}</code>\n"
-                f"────────────────────\n"
-                f"⚡ <i>Awaiting direct payment confirmation...</i>"
-            ),
+            "text": f"⚽ <b>SPORT ENGINE TELEMETRY</b>\n──────────────────────────────\n{message}",
             "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-            "reply_markup": inline_keyboard
+            "disable_web_page_preview": True
         }
         try:
-            response = await client.post(url, json=payload, timeout=10.0)
-            if response.status_code == 200:
-                logging.info("✅ Task alert with verified Paystack checkout link dispatched.")
-                return True
-        except httpx.RequestException as e:
-            logging.error(f"❌ Dispatch Network Error: {e}")
-        return False
+            await client.post(url, json=payload, timeout=10.0)
+        except Exception as e:
+            logging.error(f"Telegram Telemetry Error: {e}")
 
-    async def scantaskgaps(self, page) -> dict:
+    async def scrape_bookmaker(self, page, url: str, bookmaker_name: str) -> dict:
+        odds_map = {}
         try:
-            await page.goto(self.targeturl, timeout=30000, wait_until="domcontentloaded")
-            await asyncio.sleep(5.0)
-            items = await page.locator("tr.job, .job-card, tr, article, div[data-id]").all()
-            for item in items[:15]:
+            logging.info(f"🌐 Connecting to {bookmaker_name}: {url}")
+            await page.goto(url, timeout=45000, wait_until="domcontentloaded")
+            await asyncio.sleep(10.0)  # Allow sockets & JS to load
+            
+            # Scroll to trigger dynamic elements
+            await page.evaluate("window.scrollBy(0, 800)")
+            await asyncio.sleep(3.0)
+
+            # Save diagnostic snapshot for debugging if selectors fail
+            os.makedirs("debug_artifacts", exist_ok=True)
+            await page.screenshot(path=f"debug_artifacts/{bookmaker_name.lower().replace(' ', '_')}.png")
+
+            # Broad multi-selector search for match rows
+            selectors = [
+                ".match-row", ".af-match", "tr.match", 
+                "div[class*='match']", "div[class*='event']", 
+                "div[class*='game']", "article"
+            ]
+            
+            elements = []
+            for sel in selectors:
+                elements = await page.locator(sel).all()
+                if len(elements) > 2:
+                    logging.info(f"Found {len(elements)} nodes on {bookmaker_name} using selector: {sel}")
+                    break
+
+            for elem in elements[:40]:
                 try:
-                    text_content = await item.inner_text()
-                    lines = [l.strip() for l in text_content.split("\n") if l.strip()]
-                    if len(lines) < 1:
+                    text = await elem.inner_text()
+                    lines = [l.strip() for l in text.split("\n") if l.strip()]
+                    
+                    if len(lines) < 2:
                         continue
-                    title = lines[0]
-                    if len(title) < 5 or "remote" in title.lower() and len(lines) == 1:
+
+                    team_one = lines[0].lower()
+                    team_two = lines[1].lower() if len(lines) > 1 else "unknown"
+                    fixture_key = "".join(filter(str.isalnum, f"{team_one}-{team_two}"))[:30]
+                    
+                    if len(fixture_key) < 5:
                         continue
-                    taskid = "".join(filter(str.isalnum, title))[:35]
-                    if taskid in self.sentcache:
-                        continue
-                    self.sentcache.add(taskid)
-                    return {
-                        "title": title,
-                        "snippet": lines[1] if len(lines) > 1 else "New recurring task entry detected."
-                    }
+
+                    valid_odds = []
+                    for line in lines[2:]:
+                        try:
+                            val = float(line.replace(",", "."))
+                            if 1.05 <= val <= 40.0:
+                                valid_odds.append(val)
+                        except ValueError:
+                            continue
+
+                    if valid_odds:
+                        odds_map[fixture_key] = max(valid_odds)
                 except Exception:
                     continue
+
         except Exception as e:
-            logging.error(f"Task board scanning exception: {e}")
-        return None
+            logging.error(f"❌ Scraping error on {bookmaker_name}: {e}")
+            
+        logging.info(f"📊 Extracted {len(odds_map)} valid fixtures from {bookmaker_name}.")
+        return odds_map
 
     async def executeengine(self):
-        logging.info("🚀 Polling 5G + Paystack Task Engine Initialized.")
+        logging.info("🚀 Diagnostic Sport Arbitrage Engine Initialized.")
         if not self.validateenvironment():
             return
+
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage"]
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled"
+                ]
             )
             context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                viewport={"width": 1280, "height": 800}
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                viewport={"width": 1440, "height": 900}
             )
+            await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             page = await context.new_page()
+
             async with httpx.AsyncClient() as client:
-                opportunity = await self.scantaskgaps(page)
-                if opportunity:
-                    # 1. Initialize live transaction via Paystack API
-                    payment_info = await self.initialize_paystack_transaction(client, opportunity['title'])
-                    if payment_info and await self.sendtelegramalert(client, opportunity, payment_info):
-                        ref = payment_info["reference"]
-                        logging.info(f"⏳ Polling Paystack for payment confirmation on ref: {ref}...")
-                        for attempt in range(30):
-                            await asyncio.sleep(10.0)
-                            is_paid = await self.verify_paystack_payment(client, ref)
-                            if is_paid:
-                                logging.info("🎉 Payment verified successfully via polling loop!")
-                                await self.execute_5g_fulfillment(opportunity)
-                                break
-                            else:
-                                logging.info(f"⏳ Attempt {attempt+1}/30: Payment pending...")
-                else:
-                    logging.info("⚠️ No live task snippet captured.")
+                odds_a = await self.scrape_bookmaker(page, self.bookmaker_a_url, "Bookmaker A")
+                odds_b = await self.scrape_bookmaker(page, self.bookmaker_b_url, "Bookmaker B")
+
+                common_fixtures = set(odds_a.keys()).intersection(set(odds_b.keys()))
+                logging.info(f"🔍 Cross-matched {len(common_fixtures)} live common fixtures.")
+
+                if len(odds_a) == 0 or len(odds_b) == 0:
+                    await self.send_telemetry(client, "⚠️ <b>Warning:</b> Sport engine captured 0 odds. Bookmaker DOM structures or anti-bot firewalls may have changed.")
+
+                signal_found = False
+                for fix in common_fixtures:
+                    o_a = odds_a[fix]
+                    o_b = odds_b[fix]
+
+                    implied_probability_sum = (1.0 / o_a) + (1.0 / o_b)
+                    
+                    if implied_probability_sum < 0.99:
+                        signal_found = True
+                        roi = round((1.0 - implied_probability_sum) * 100, 2)
+                        
+                        if fix in self.sentcache:
+                            continue
+                        self.sentcache.add(fix)
+                        
+                        stake_a = self.round_to_nearest(int(self.bankroll * ((1.0 / o_a) / implied_probability_sum)))
+                        stake_b = self.round_to_nearest(int(self.bankroll * ((1.0 / o_b) / implied_probability_sum)))
+
+                        alert_text = (
+                            f"⚖️ <b>ARBITRAGE OPPORTUNITY DETECTED</b>\n"
+                            f"──────────────────────────────\n"
+                            f"🏆 <b>Fixture:</b> {fix}\n"
+                            f"📈 <b>Odds A:</b> {o_a} | <b>Stake:</b> ₦{stake_a}\n"
+                            f"📈 <b>Odds B:</b> {o_b} | <b>Stake:</b> ₦{stake_b}\n"
+                            f"💰 <b>Guaranteed ROI:</b> +{roi}%"
+                        )
+                        await self.send_telemetry(client, alert_text)
+
+                if not signal_found:
+                    logging.info("ℹ️ Scan complete. No profitable arbitrage spreads (< 0.99) found in current live feed.")
+
             await browser.close()
 
 if __name__ == "__main__":
-    asyncio.run(Polling5GEngine().executeengine())
+    asyncio.run(DiagnosticArbitrageEngine().executeengine())
