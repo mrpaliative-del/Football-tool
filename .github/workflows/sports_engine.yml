@@ -16,91 +16,76 @@ jobs:
   run-sports-engine:
     name: Run Multi-Match Arbitrage Scanner
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 12
 
     env:
       PYTHONUNBUFFERED: "1"
-      PYTHONPATH: .
       TELEGRAMBOTTOKEN: ${{ secrets.TELEGRAMBOTTOKEN }}
       TARGETCHATID: ${{ secrets.TARGETCHATID }}
-
       BANKROLLPOOL: "20000"
-      MIN_ARBITRAGE_ROI: "0.5"
-      MAX_ARBITRAGE_ROI: "30"
-
+      MIN_ARBITRAGE_ROI: "5"
+      MAX_ARBITRAGE_ROI: "50"
       RUN_DURATION_SECONDS: "480"
       POLL_INTERVAL_SECONDS: "15"
       PAGE_WAIT_SECONDS: "5"
-
-      ARBITRAGE_DB_PATH: arbitrage_state.sqlite3
       LOG_LEVEL: INFO
+      BOOKMAKER_A_URL: "https://www.sportybet.com/ng/sport/football"
+      BOOKMAKER_B_URL: "https://www.bet9ja.com/sport/soccer"
+      ARBITRAGE_DB_PATH: arbitrage_signals.sqlite3
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
-      - name: Set Up Python
-        uses: actions/setup-python@v6
+      - name: Set up Python
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
+          cache: pip
 
-      - name: Validate Required Files
-        shell: bash
+      - name: Validate Repository Files
         run: |
-          set -euo pipefail
+          test -f requirements.txt || {
+            echo "::error::requirements.txt is missing"
+            exit 1
+          }
 
-          if [ ! -f requirements.txt ]; then
-            echo "::error::requirements.txt is missing from the repository root."
+          if [ ! -f multi_match_arbitrage.py ] && [ ! -f bot.py ]; then
+            echo "::error::Scanner file missing: expected multi_match_arbitrage.py or bot.py"
             exit 1
           fi
-
-          if [ -f multi_match_arbitrage.py ]; then
-            echo "SCANNER_FILE=multi_match_arbitrage.py" >> "$GITHUB_ENV"
-          elif [ -f bot.py ]; then
-            echo "SCANNER_FILE=bot.py" >> "$GITHUB_ENV"
-          else
-            echo "::error::Neither multi_match_arbitrage.py nor bot.py was found in the repository root."
-            exit 1
-          fi
-
-          echo "Required files validated."
-
-      - name: Install Ubuntu Audio Library
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2t64
 
       - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      - name: Verify Playwright Installation
-        run: |
-          python -c "import playwright; print('Playwright Python package installed successfully.')"
-
       - name: Install Playwright Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: Validate Telegram Secrets
         run: |
-          python -m playwright install chromium
+          python - <<'PY'
+          import os
+          import sys
 
-      - name: Validate Telegram Configuration
-        shell: bash
-        run: |
-          set -euo pipefail
+          required = ["TELEGRAMBOTTOKEN", "TARGETCHATID"]
+          missing = [
+              key for key in required
+              if not os.environ.get(key, "").strip()
+          ]
 
-          if [ -z "$TELEGRAMBOTTOKEN" ]; then
-            echo "::error::Missing TELEGRAMBOTTOKEN repository secret."
-            exit 1
-          fi
+          if missing:
+              print("Missing GitHub Secrets: " + ", ".join(missing))
+              sys.exit(1)
 
-          if [ -z "$TARGETCHATID" ]; then
-            echo "::error::Missing TARGETCHATID repository secret."
-            exit 1
-          fi
-
-          echo "Telegram configuration is present."
+          print("Telegram configuration is present.")
+          PY
 
       - name: Run Multi-Match Arbitrage Scanner
         run: |
-          echo "Starting scanner: $SCANNER_FILE"
-          python -u "$SCANNER_FILE"
+          if [ -f multi_match_arbitrage.py ]; then
+            python -u multi_match_arbitrage.py
+          else
+            python -u bot.py
+          fi
