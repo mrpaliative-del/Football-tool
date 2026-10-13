@@ -12,9 +12,9 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 
-app = FastAPI(title="Dynamic Production Engine")
+app = FastAPI(title="Unified Production Arbitrage & Task Engine")
 
-# Strict Environment Validation (No hardcoded credentials or defaults)
+# Strict Environment Configuration (Zero Hardcoding)
 TELEGRAM_TOKEN = os.getenv("TELEGRAMBOTTOKEN")
 TARGET_CHAT_ID = os.getenv("TARGETCHATID")
 PAYSTACK_SECRET = os.getenv("PAYSTACK_SECRET_KEY")
@@ -23,8 +23,8 @@ PARTNERSTACK_API_KEY = os.getenv("PARTNERSTACK_API_KEY")
 IMPACT_ACCOUNT_SID = os.getenv("IMPACT_ACCOUNT_SID")
 IMPACT_AUTH_TOKEN = os.getenv("IMPACT_AUTH_TOKEN")
 
-SPORTYBET_URL = os.getenv("SPORTYBET_LIVE_URL")
-BET9JA_URL = os.getenv("BET9JA_LIVE_URL")
+SPORTYBET_PREMATCH_URL = os.getenv("SPORTYBET_PREMATCH_URL")
+BET9JA_PREMATCH_URL = os.getenv("BET9JA_PREMATCH_URL")
 
 BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}" if TELEGRAM_TOKEN else ""
 
@@ -55,7 +55,7 @@ async def send_telegram(client: httpx.AsyncClient, text: str, reply_markup: dict
         return False
 
 # ==========================================
-# 1. LIVE WEBHOOK INGESTION (Dynamic Inbound Tasks)
+# 1. LIVE WEBHOOK INGESTION (Dynamic Tasks)
 # ==========================================
 @app.post("/webhook/task")
 async def receive_external_task(task: TaskPayload, background_tasks: BackgroundTasks):
@@ -78,7 +78,7 @@ async def process_live_task(task: TaskPayload):
                     },
                     json={
                         "email": task.client_email,
-                        "amount": 100000,  # ₦1,000 Escrow Fee
+                        "amount": 100000,  # ₦1,000 Escrow Unlock Fee
                         "metadata": {"task_title": task.title, "target_url": str(task.direct_link)}
                     },
                     timeout=10.0
@@ -105,7 +105,7 @@ async def process_live_task(task: TaskPayload):
 # 2. DYNAMIC AFFILIATE API WORKER
 # ==========================================
 async def dynamic_affiliate_worker():
-    """Polls live APIs dynamically without hardcoded campaign arrays"""
+    """Polls live enterprise partner APIs dynamically"""
     logging.info("💻 Dynamic Affiliate API Worker Initialized.")
     sent_cache = set()
 
@@ -175,16 +175,16 @@ async def dynamic_affiliate_worker():
         await asyncio.sleep(21600)
 
 # ==========================================
-# 3. LIVE SPORTSBOOK NETWORK XHR SNIFFER
+# 3. UPCOMING PRE-MATCH FIXTURES WORKER
 # ==========================================
-async def live_sports_sniffer():
-    """Intercepts live sports data streams from dynamically configured URLs"""
-    if not SPORTYBET_URL and not BET9JA_URL:
-        logging.warning("⚠️ Sports URLs not configured in environment variables. Sniffer inactive.")
+async def upcoming_fixtures_worker():
+    """Sniffs upcoming scheduled pre-match fixtures and odds payload dynamically"""
+    if not SPORTYBET_PREMATCH_URL and not BET9JA_PREMATCH_URL:
+        logging.warning("⚠️ Pre-match URLs not configured in environment variables. Upcoming fixture worker inactive.")
         return
 
-    logging.info("⚽ Live Sports Network Sniffer Initialized.")
-    urls_to_monitor = [u for u in [SPORTYBET_URL, BET9JA_URL] if u]
+    logging.info("⚽ Dynamic Upcoming Pre-Match Fixtures Worker Initialized.")
+    urls_to_monitor = [u for u in [SPORTYBET_PREMATCH_URL, BET9JA_PREMATCH_URL] if u]
 
     while True:
         try:
@@ -195,26 +195,29 @@ async def live_sports_sniffer():
 
                 async def handle_response(response):
                     url = response.url
-                    if ("market" in url or "odds" in url or "fixture" in url) and response.status == 200:
+                    if ("schedule" in url or "prematch" in url or "odds" in url or "market" in url) and response.status == 200:
                         try:
                             _ = await response.json()
-                            logging.info(f"📡 Dynamic odds payload intercepted from {url[:50]}...")
+                            logging.info(f"📡 Upcoming pre-match JSON payload intercepted from: {url[:60]}...")
                         except Exception:
                             pass
 
                 page.on("response", handle_response)
-                
+
                 for target_url in urls_to_monitor:
                     try:
-                        await page.goto(target_url, timeout=45000)
+                        logging.info(f"🌐 Navigating to upcoming schedule: {target_url}")
+                        await page.goto(target_url, timeout=60000, wait_until="domcontentloaded")
+                        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                         await asyncio.sleep(60)
                     except Exception as e:
-                        logging.error(f"Navigation error on {target_url}: {e}")
+                        logging.error(f"❌ Navigation error on {target_url}: {e}")
 
                 await browser.close()
         except Exception as e:
-            logging.error(f"Sports Sniffer Error: {e}")
-            await asyncio.sleep(60)
+            logging.error(f"❌ Upcoming Fixtures Worker Exception: {e}")
+            
+        await asyncio.sleep(900)
 
 # ==========================================
 # SYSTEM STARTUP
@@ -222,8 +225,8 @@ async def live_sports_sniffer():
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(dynamic_affiliate_worker())
-    asyncio.create_task(live_sports_sniffer())
-    logging.info("🚀 Dynamic System Engine Online.")
+    asyncio.create_task(upcoming_fixtures_worker())
+    logging.info("🚀 Unified Production Engine Online (Webhooks + Affiliates + Pre-Match Sniffer Active).")
 
 @app.get("/")
 def health_check():
@@ -235,6 +238,6 @@ def health_check():
             "paystack": bool(PAYSTACK_SECRET),
             "partnerstack": bool(PARTNERSTACK_API_KEY),
             "impact": bool(IMPACT_ACCOUNT_SID and IMPACT_AUTH_TOKEN),
-            "sports_monitored": bool(SPORTYBET_URL or BET9JA_URL)
+            "prematch_monitored": bool(SPORTYBET_PREMATCH_URL or BET9JA_PREMATCH_URL)
         }
     }
