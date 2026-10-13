@@ -1,6 +1,8 @@
 name: Sports Value Engine
 
 on:
+  push:
+    branches: [ "main" ]
   schedule:
     - cron: '*/10 * * * *'   # Runs every 10 minutes, 24/7
   workflow_dispatch:
