@@ -12,18 +12,14 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: global-task-gap-engine-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   run-task-engine:
-    runs-on: ubuntu-latest
+    name: Run Global Task Scanner
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     env:
       PYTHONUNBUFFERED: "1"
-      PYTHONDONTWRITEBYTECODE: "1"
       TELEGRAMBOTTOKEN: ${{ secrets.TELEGRAMBOTTOKEN }}
       TARGETCHATID: ${{ secrets.TARGETCHATID }}
       MINIMUM_REWARD_USD: "0.75"
@@ -33,37 +29,44 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
+
+      - name: Validate Repository Files
+        run: |
+          test -f task_bot.py || {
+            echo "::error::task_bot.py is missing from the repository root"
+            exit 1
+          }
 
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install httpx
 
-      - name: Validate Configuration
+      - name: Validate Telegram Secrets
         run: |
           python - <<'PY'
           import os
           import sys
 
-          required = ("TELEGRAMBOTTOKEN", "TARGETCHATID")
+          required = ["TELEGRAMBOTTOKEN", "TARGETCHATID"]
           missing = [
               key for key in required
               if not os.environ.get(key, "").strip()
           ]
 
           if missing:
-              print("Missing required GitHub Secrets: " + ", ".join(missing))
+              print("Missing GitHub Secrets: " + ", ".join(missing))
               sys.exit(1)
 
-          print("Required Telegram configuration is present.")
+          print("Telegram configuration is present.")
           PY
 
       - name: Run Global Task Scan
-        run: python task_bot.py
+        run: python -u task_bot.py
