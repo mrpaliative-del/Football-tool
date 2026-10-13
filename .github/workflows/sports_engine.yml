@@ -5,86 +5,87 @@ on:
   push:
     branches:
       - main
-
   schedule:
-    - cron: "*/10 * * * *"
-
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
-# Allow read-only repository access.
 permissions:
   contents: read
-
-# Avoid multiple simultaneous scans of the same branch.
-concurrency:
-  group: sports-value-engine-${{ github.ref }}
-  cancel-in-progress: false
 
 jobs:
   run-sports-engine:
     name: Run Multi-Match Arbitrage Scanner
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
 
     env:
       PYTHONUNBUFFERED: "1"
-      PYTHONDONTWRITEBYTECODE: "1"
-
-      # Telegram credentials must be stored as GitHub Secrets.
       TELEGRAMBOTTOKEN: ${{ secrets.TELEGRAMBOTTOKEN }}
       TARGETCHATID: ${{ secrets.TARGETCHATID }}
-
-      # Engine configuration.
       BANKROLLPOOL: "20000"
       MIN_ARBITRAGE_ROI: "5"
       MAX_ARBITRAGE_ROI: "50"
       RUN_DURATION_SECONDS: "480"
       POLL_INTERVAL_SECONDS: "15"
       PAGE_WAIT_SECONDS: "5"
-      LOG_LEVEL: "INFO"
-
-      # Configure these in Settings > Secrets and variables > Actions > Variables.
-      BOOKMAKER_A_URL: ${{ vars.BOOKMAKER_A_URL || 'https://www.sportybet.com/ng/sport/football' }}
-      BOOKMAKER_B_URL: ${{ vars.BOOKMAKER_B_URL || 'https://www.bet9ja.com/sport/soccer' }}
-
-      # Runner-local database; this does not persist between fresh runners.
-      ARBITRAGE_DB_PATH: "arbitrage_signals.sqlite3"
+      LOG_LEVEL: INFO
+      BOOKMAKER_A_URL: "https://www.sportybet.com/ng/sport/football"
+      BOOKMAKER_B_URL: "https://www.bet9ja.com/sport/soccer"
+      ARBITRAGE_DB_PATH: arbitrage_signals.sqlite3
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Set Up Python
-        uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
-          cache-dependency-path: requirements.txt
+
+      - name: Validate Repository Files
+        run: |
+          test -f requirements.txt || {
+            echo "::error::requirements.txt is missing"
+            exit 1
+          }
+
+          if [ ! -f multi_match_arbitrage.py ] && [ ! -f bot.py ]; then
+            echo "::error::Scanner file missing: expected multi_match_arbitrage.py or bot.py"
+            exit 1
+          fi
 
       - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt
 
-      - name: Install Chromium for Playwright
+      - name: Install Playwright Chromium
         run: python -m playwright install --with-deps chromium
 
-      - name: Validate Configuration
+      - name: Validate Telegram Secrets
         run: |
           python - <<'PY'
           import os
           import sys
 
-          required = ("TELEGRAMBOTTOKEN", "TARGETCHATID")
-          missing = [key for key in required if not os.getenv(key)]
+          required = ["TELEGRAMBOTTOKEN", "TARGETCHATID"]
+          missing = [
+              key for key in required
+              if not os.environ.get(key, "").strip()
+          ]
 
           if missing:
-              print("Missing required GitHub Secrets: " + ", ".join(missing))
+              print("Missing GitHub Secrets: " + ", ".join(missing))
               sys.exit(1)
 
-          print("Required Telegram configuration is present.")
-          print("Credentials will not be printed.")
+          print("Telegram configuration is present.")
           PY
 
-      - name: Execute Sports Value Engine
-        run: python bot.py
+      - name: Run Multi-Match Arbitrage Scanner
+        run: |
+          if [ -f multi_match_arbitrage.py ]; then
+            python -u multi_match_arbitrage.py
+          else
+            python -u bot.py
+          fi
