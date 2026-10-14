@@ -1,425 +1,369 @@
+#!/usr/bin/env python3
+"""Read-only football 1X2 odds comparison and arbitrage alert scanner.
 
-import os
-import json
-import time
+Important:
+- The Odds API is the supported external odds source.
+- SportyBet's website endpoint is undocumented and may change. Use only where
+  access is permitted by SportyBet's terms and applicable law.
+- This tool never places bets. It reports theoretical opportunities only.
+"""
+from __future__ import annotations
 import hashlib
-import logging
+import json
+import os
+import re
 import sqlite3
+import sys
+import time
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
+from typing import Any
 
 import httpx
 
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
-    format="%(asctime)s %(levelname)s %(message)s",
-)
-log = logging.getLogger("surebet")
+ODDS_API_BASE = "https://api.the-odds-api.com/v4"
+SPORTYBET_DEFAULT_URL = "https://www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents"
+DB_PATH = os.getenv("STATE_DB_PATH", "arbitrage_state.sqlite3")
 
-SPORTYBET_URL = os.getenv(
-    "SPORTYBET_API_URL",
-    "https://www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents",
-)
-FOREIGN_ODDS_JSON_URL = os.getenv("FOREIGN_ODDS_JSON_URL", "").strip()
-
-TELEGRAM_TOKEN = os.getenv("TELEGRAMBOTTOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("TARGETCHATID", "").strip()
-
-BANKROLL = max(0.0, float(os.getenv("BANKROLLPOOL", "20000")))
-MIN_ROI = max(0.0, float(os.getenv("MIN_ARBITRAGE_ROI", "0.5")))
-MAX_ROI = max(MIN_ROI, float(os.getenv("MAX_ARBITRAGE_ROI", "30")))
-DB_PATH = os.getenv("ARBITRAGE_DB_PATH", "arbitrage_state.sqlite3")
-TIMELINE_HOURS = max(1, int(os.getenv("TIMELINE_HOURS", "48")))
-
-OUTCOMES = ("home", "draw", "away")
-LABELS = {"home": "Home", "draw": "Draw", "away": "Away"}
-
-
-def parse_time(value):
-    if value is None:
-        return None
+def env_int(name: str, default: int) -> int:
     try:
-        if isinstance(value, (int, float)):
-            return value / 1000 if value > 10_000_000_000 else value
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
 
-        parsed = datetime.fromisoformat(
-            str(value).replace("Z", "+00:00")
-        )
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.timestamp()
-    except (ValueError, TypeError, OverflowError):
-        return None
+def env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
 
-
-def normalize_name(value):
-    import re
-    value = str(value or "").lower()
-    value = re.sub(r"\b(fc|afc|sc|cf|club|the)\b", " ", value)
+def norm_name(value: str) -> str:
+    value = value.lower().replace("&", " and ")
+    value = re.sub(r"\b(fc|afc|cf|sc|club|women|wfc)\b", " ", value)
     return re.sub(r"[^a-z0-9]+", "", value)
 
+def similar(a: str, b: str) -> float:
+    na, nb = norm_name(a), norm_name(b)
+    if not na or not nb:
+        return 0.0
+    if na == nb:
+        return 1.0
+    return SequenceMatcher(None, na, nb).ratio()
 
-def init_db():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS sent_signals (
-                signal_key TEXT PRIMARY KEY,
-                sent_at TEXT NOT NULL
-            )
-        """)
+def send_telegram(text: str) -> bool:
+    token = os.getenv("TELEGRAMBOTTOKEN", "").strip()
+    chat_id = os.getenv("TARGETCHATID", "").strip()
+    if not token or not chat_id:
+        print("Telegram not configured; skipping message.")
+        return False
+    try:
+        r = httpx.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data={"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
+            timeout=20.0,
+        )
+        r.raise_for_status()
+        result = r.json()
+        if not result.get("ok"):
+            print(f"Telegram API returned not-ok: {result}")
+            return False
+        return True
+    except Exception as exc:
+        print(f"Telegram send failed: {type(exc).__name__}: {exc}")
+        return False
 
+def init_db() -> None:
+    with sqlite3.connect(DB_PATH) as con:
+        con.execute("""CREATE TABLE IF NOT EXISTS sent_alerts (
+            alert_key TEXT PRIMARY KEY, sent_at TEXT NOT NULL
+        )""")
 
-def sportybet_odds(event):
-    """Extract complete 1X2 odds when the provider payload matches this schema."""
-    for market in event.get("markets", []):
-        market_id = str(market.get("id", ""))
-        market_desc = str(market.get("desc", "")).lower().strip()
+def already_sent(key: str) -> bool:
+    with sqlite3.connect(DB_PATH) as con:
+        return con.execute("SELECT 1 FROM sent_alerts WHERE alert_key=?", (key,)).fetchone() is not None
 
-        if market_id != "1" and market_desc not in {
-            "1x2", "match result", "full time result"
-        }:
-            continue
+def mark_sent(key: str) -> None:
+    with sqlite3.connect(DB_PATH) as con:
+        con.execute("INSERT OR IGNORE INTO sent_alerts(alert_key, sent_at) VALUES (?, ?)",
+                    (key, datetime.now(timezone.utc).isoformat()))
 
-        result = {}
+def get_odds_api_events(client: httpx.Client) -> list[dict[str, Any]]:
+    key = os.getenv("ODDS_API_KEY", "").strip()
+    if not key:
+        raise RuntimeError("Missing ODDS_API_KEY secret.")
+    sport = os.getenv("ODDS_SPORT_KEY", "soccer_epl").strip()
+    regions = os.getenv("ODDS_REGIONS", "uk,eu").strip()
+    url = f"{ODDS_API_BASE}/sports/{sport}/odds/"
+    response = client.get(url, params={
+        "apiKey": key, "regions": regions, "markets": "h2h",
+        "oddsFormat": "decimal", "dateFormat": "iso",
+    })
+    if response.status_code == 401:
+        raise RuntimeError("The Odds API rejected ODDS_API_KEY (HTTP 401).")
+    if response.status_code == 429:
+        raise RuntimeError("The Odds API rate limit/quota was reached (HTTP 429).")
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, list):
+        raise RuntimeError("Unexpected The Odds API response: expected a JSON list.")
+    print(f"The Odds API: received {len(data)} events; remaining requests header="
+          f"{response.headers.get('x-requests-remaining', 'not provided')}")
+    return data
 
-        for outcome in market.get("outcomes", []):
-            if outcome.get("isActive") is False:
-                continue
+def sportybet_headers() -> dict[str, str]:
+    # Optional headers are only for an authorized API provider. Do not paste browser
+    # cookies or session authorization values into repository files.
+    headers = {"Accept": "application/json", "User-Agent": "Football-tool-readonly/1.0"}
+    token = os.getenv("SPORTYBET_API_KEY", "").strip()
+    if token:
+        mode = os.getenv("SPORTYBET_AUTH_MODE", "bearer").strip().lower()
+        if mode == "bearer":
+            headers["Authorization"] = f"Bearer {token}"
+        elif mode == "x-api-key":
+            headers["x-api-key"] = token
+        else:
+            raise RuntimeError("SPORTYBET_AUTH_MODE must be 'bearer' or 'x-api-key'.")
+    return headers
 
-            oid = str(outcome.get("id", "")).strip()
-            desc = str(outcome.get("desc", "")).lower().strip()
+def walk_dicts(obj: Any):
+    if isinstance(obj, dict):
+        yield obj
+        for v in obj.values():
+            yield from walk_dicts(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from walk_dicts(item)
 
-            if oid == "1" or desc in {"1", "home", "home win"}:
-                key = "home"
-            elif oid == "2" or desc in {"x", "draw", "tie"}:
-                key = "draw"
-            elif oid == "3" or desc in {"2", "away", "away win"}:
-                key = "away"
-            else:
-                continue
-
-            try:
-                odd = float(outcome.get("odds"))
-            except (ValueError, TypeError):
-                continue
-
-            if odd > 1:
-                result[key] = odd
-
-        if all(key in result for key in OUTCOMES):
-            return result
-
+def pick_first(d: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for k in keys:
+        if k in d and d[k] not in (None, ""):
+            return d[k]
     return None
 
+def parse_sportybet_payload(payload: Any) -> list[dict[str, Any]]:
+    """Best-effort parser; SportyBet response schema is not guaranteed."""
+    found = []
+    for d in walk_dicts(payload):
+        home = pick_first(d, ("homeTeamName", "homeName", "homeTeam", "home", "team1Name"))
+        away = pick_first(d, ("awayTeamName", "awayName", "awayTeam", "away", "team2Name"))
+        if isinstance(home, dict):
+            home = pick_first(home, ("name", "teamName", "enName"))
+        if isinstance(away, dict):
+            away = pick_first(away, ("name", "teamName", "enName"))
+        if not isinstance(home, str) or not isinstance(away, str):
+            continue
+        kickoff = pick_first(d, ("estimateStartTime", "startTime", "kickoffTime", "matchTime", "eventTime"))
+        try:
+            kickoff_num = float(kickoff)
+            if kickoff_num > 10_000_000_000:
+                kickoff_num /= 1000
+            kickoff_iso = datetime.fromtimestamp(kickoff_num, timezone.utc).isoformat()
+        except (TypeError, ValueError, OSError, OverflowError):
+            if isinstance(kickoff, str):
+                kickoff_iso = kickoff
+            else:
+                kickoff_iso = ""
+        odds = extract_sportybet_1x2(d)
+        if all(odds.get(k) and odds[k] > 1.0 for k in ("home", "draw", "away")):
+            found.append({"home": home, "away": away, "kickoff": kickoff_iso, "odds": odds})
+    # Deduplicate repeated nested representations
+    unique, seen = [], set()
+    for e in found:
+        k = (norm_name(e["home"]), norm_name(e["away"]), e["kickoff"], tuple(sorted(e["odds"].items())))
+        if k not in seen:
+            seen.add(k); unique.append(e)
+    return unique
 
-def fetch_sportybet(client):
+def extract_sportybet_1x2(d: dict[str, Any]) -> dict[str, float]:
+    """Recognize only explicit 1/X/2 or home/draw/away outcome labels."""
+    result: dict[str, float] = {}
+    # Some response shapes include a market with outcomes; scan only dictionaries
+    # containing outcome labels and plausible decimal odds.
+    for child in walk_dicts(d):
+        label = str(pick_first(child, ("outcomeName", "name", "desc", "marketName", "title", "specifier")) or "").strip().lower()
+        raw = pick_first(child, ("odds", "odd", "decimalOdds", "price", "value"))
+        try:
+            odd = float(raw)
+        except (TypeError, ValueError):
+            odd = 0.0
+        if not (1.001 <= odd <= 1000):
+            continue
+        if label in ("1", "home", "home win", "1x2_home", "home team"):
+            result.setdefault("home", odd)
+        elif label in ("x", "draw", "tie"):
+            result.setdefault("draw", odd)
+        elif label in ("2", "away", "away win", "1x2_away", "away team"):
+            result.setdefault("away", odd)
+    return result
+
+def get_sportybet_events(client: httpx.Client) -> list[dict[str, Any]]:
+    url = os.getenv("SPORTYBET_FEED_URL", SPORTYBET_DEFAULT_URL).strip()
+    # Query parameters used by some public website versions; undocumented and subject
+    # to change. Override SPORTYBET_FEED_URL only with an endpoint you are authorized to use.
     params = {
-        "sportId": "sr:sport:1",
-        "marketId": "1",
-        "pageSize": "100",
+        "sportId": os.getenv("SPORTYBET_SPORT_ID", "sr:sport:1"),
+        "marketId": os.getenv("SPORTYBET_MARKET_ID", "1"),
+        "pageSize": os.getenv("SPORTYBET_PAGE_SIZE", "100"),
         "pageNum": "1",
         "todayGames": "false",
-        "timeline": str(TIMELINE_HOURS),
-        "_t": str(int(time.time() * 1000)),
+        "timeline": os.getenv("SPORTYBET_TIMELINE_HOURS", "48"),
+        "timestamp": str(int(time.time() * 1000)),
     }
-
-    response = client.get(
-        SPORTYBET_URL,
-        params=params,
-        headers={
-            "Accept": "application/json",
-            "Current-Country": "NG",
-            "User-Agent": "SportsValueEngine/1.0",
-        },
-    )
+    response = client.get(url, params=params, headers=sportybet_headers())
+    if response.status_code in (401, 403):
+        raise RuntimeError(f"SportyBet feed denied access (HTTP {response.status_code}). Check endpoint/authorization.")
     response.raise_for_status()
-    payload = response.json()
+    try:
+        payload = response.json()
+    except json.JSONDecodeError:
+        raise RuntimeError("SportyBet endpoint did not return JSON.")
+    events = parse_sportybet_payload(payload)
+    print(f"SportyBet feed: HTTP {response.status_code}; parsed {len(events)} complete 1X2 events.")
+    if not events:
+        print("WARNING: parser found no complete 1X2 events. The endpoint schema/market mapping is unverified; no cross-feed opportunities can be trusted.")
+    return events
 
-    data = payload.get("data") or {}
-    results = []
-
-    for tournament in data.get("tournaments", []):
-        league = tournament.get("name", "")
-
-        for event in tournament.get("events", []):
-            home = event.get("homeTeamName", "")
-            away = event.get("awayTeamName", "")
-            odds = sportybet_odds(event)
-
-            if not home or not away or not odds:
+def best_foreign_1x2(event: dict[str, Any]) -> dict[str, Any] | None:
+    outcomes: dict[str, tuple[float, str]] = {}
+    home, away = str(event.get("home_team", "")), str(event.get("away_team", ""))
+    for book in event.get("bookmakers", []) or []:
+        for market in book.get("markets", []) or []:
+            if market.get("key") != "h2h":
                 continue
+            for outcome in market.get("outcomes", []) or []:
+                name = str(outcome.get("name", ""))
+                try:
+                    price = float(outcome.get("price"))
+                except (TypeError, ValueError):
+                    continue
+                if price <= 1.0:
+                    continue
+                if similar(name, home) >= 0.8:
+                    k = "home"
+                elif similar(name, away) >= 0.8:
+                    k = "away"
+                elif name.strip().lower() in ("draw", "tie"):
+                    k = "draw"
+                else:
+                    continue
+                if k not in outcomes or price > outcomes[k][0]:
+                    outcomes[k] = (price, str(book.get("title", "External bookmaker")))
+    if not all(k in outcomes for k in ("home", "draw", "away")):
+        return None
+    return {k: {"price": outcomes[k][0], "bookmaker": outcomes[k][1]} for k in outcomes}
 
-            results.append({
-                "source": "SportyBet Nigeria",
-                "home": home,
-                "away": away,
-                "league": league,
-                "start_time": parse_time(
-                    event.get("estimateStartTime")
-                    or event.get("startTime")
-                ),
-                "market": "1X2",
-                "odds": odds,
-            })
-
-    log.info("SportyBet events normalized: %d", len(results))
-    return results
-
-
-def fetch_foreign(client):
-    if not FOREIGN_ODDS_JSON_URL:
-        log.warning(
-            "FOREIGN_ODDS_JSON_URL is not configured. "
-            "Cross-bookmaker scanning is disabled."
-        )
-        return []
-
-    response = client.get(FOREIGN_ODDS_JSON_URL)
-    response.raise_for_status()
-    payload = response.json()
-
-    if isinstance(payload, dict):
-        payload = payload.get("events", payload.get("data", []))
-
-    if not isinstance(payload, list):
-        raise ValueError("Foreign feed must return a JSON event list.")
-
-    results = []
-
-    for item in payload:
-        odds = item.get("odds") or {}
-        clean_odds = {}
-
-        for key in OUTCOMES:
-            try:
-                odd = float(odds.get(key))
-            except (ValueError, TypeError):
-                continue
-
-            if odd > 1:
-                clean_odds[key] = odd
-
-        home = item.get("home") or item.get("home_team")
-        away = item.get("away") or item.get("away_team")
-
-        if not home or not away:
-            continue
-        if not all(key in clean_odds for key in OUTCOMES):
-            continue
-
-        results.append({
-            "source": item.get("source", "Foreign bookmaker"),
-            "home": str(home),
-            "away": str(away),
-            "league": item.get("league", ""),
-            "start_time": parse_time(
-                item.get("start_time") or item.get("commence_time")
-            ),
-            "market": str(item.get("market", "1X2")).upper(),
-            "odds": clean_odds,
-        })
-
-    log.info("Foreign bookmaker events normalized: %d", len(results))
-    return results
-
-
-def events_match(local, foreign):
-    if normalize_name(local["home"]) != normalize_name(foreign["home"]):
-        return False
-
-    if normalize_name(local["away"]) != normalize_name(foreign["away"]):
-        return False
-
-    if local["market"] != "1X2" or foreign["market"] != "1X2":
-        return False
-
-    a = local.get("start_time")
-    b = foreign.get("start_time")
-
-    if a is not None and b is not None and abs(a - b) > 3 * 3600:
-        return False
-
-    return True
-
-
-def calculate_surebet(local, foreign, bankroll):
-    best = {}
-
-    for outcome in OUTCOMES:
-        available = []
-
-        for event in (local, foreign):
-            try:
-                odd = float(event["odds"][outcome])
-            except (KeyError, ValueError, TypeError):
-                continue
-
-            if odd > 1:
-                available.append((odd, event["source"]))
-
-        if not available:
+def parse_dt(value: str) -> float | None:
+    if not value:
+        return None
+    try:
+        s = value.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (ValueError, TypeError):
+        try:
+            v = float(value)
+            if v > 10_000_000_000: v /= 1000
+            return v
+        except (ValueError, TypeError):
             return None
 
-        best[outcome] = max(available, key=lambda item: item[0])
+def match_events(sporty: dict[str, Any], foreign: dict[str, Any]) -> bool:
+    if similar(sporty["home"], foreign.get("home_team", "")) < 0.82:
+        return False
+    if similar(sporty["away"], foreign.get("away_team", "")) < 0.82:
+        return False
+    st = parse_dt(sporty.get("kickoff", ""))
+    ft = parse_dt(foreign.get("commence_time", ""))
+    if st is not None and ft is not None and abs(st - ft) > env_int("MATCH_TIME_TOLERANCE_MINUTES", 180) * 60:
+        return False
+    return True
 
-    implied_sum = sum(1 / best[key][0] for key in OUTCOMES)
-
-    if implied_sum >= 1:
+def calculate_arbitrage(odds: dict[str, float], bankroll: float) -> dict[str, Any] | None:
+    if bankroll <= 0 or not all(odds.get(k, 0) > 1.0 for k in ("home", "draw", "away")):
         return None
+    inv_sum = sum(1.0 / odds[k] for k in ("home", "draw", "away"))
+    roi = (1.0 / inv_sum - 1.0) * 100.0
+    if inv_sum >= 1.0:
+        return None
+    stakes = {k: bankroll * (1.0 / odds[k]) / inv_sum for k in odds}
+    returns = {k: stakes[k] * odds[k] for k in odds}
+    return {"roi_pct": roi, "implied_sum": inv_sum, "stakes": stakes,
+            "returns": returns, "min_return": min(returns.values()),
+            "profit": min(returns.values()) - bankroll}
 
-    roi = (1 / implied_sum - 1) * 100
-
-    stakes = {
-        key: bankroll * (1 / best[key][0]) / implied_sum
-        for key in OUTCOMES
-    }
-
-    returns = {
-        key: stakes[key] * best[key][0]
-        for key in OUTCOMES
-    }
-
-    min_return = min(returns.values())
-
-    return {
-        "best": best,
-        "roi": roi,
-        "stakes": stakes,
-        "returns": returns,
-        "implied_sum": implied_sum,
-        "min_return": min_return,
-        "profit": min_return - bankroll,
-    }
-
-
-def signal_key(local, calc):
-    value = {
-        "home": local["home"],
-        "away": local["away"],
-        "odds": {
-            key: calc["best"][key][0]
-            for key in OUTCOMES
-        },
-        "sources": {
-            key: calc["best"][key][1]
-            for key in OUTCOMES
-        },
-    }
-
-    raw = json.dumps(value, sort_keys=True)
+def alert_key(home: str, away: str, kickoff: str, odds: dict[str, float]) -> str:
+    raw = json.dumps([norm_name(home), norm_name(away), kickoff, odds], sort_keys=True)
     return hashlib.sha256(raw.encode()).hexdigest()
 
+def fmt_money(value: float) -> str:
+    return f"₦{value:,.2f}"
 
-def send_telegram(client, message):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        raise RuntimeError(
-            "Set TELEGRAMBOTTOKEN and TARGETCHATID in GitHub Secrets."
-        )
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-
-    response = client.post(url, json={
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "disable_web_page_preview": True,
-    })
-    response.raise_for_status()
-
-    data = response.json()
-    if not data.get("ok"):
-        raise RuntimeError("Telegram rejected the notification.")
-
-
-def was_sent(key):
-    with sqlite3.connect(DB_PATH) as conn:
-        return conn.execute(
-            "SELECT 1 FROM sent_signals WHERE signal_key=?",
-            (key,),
-        ).fetchone() is not None
-
-
-def record_sent(key):
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO sent_signals VALUES (?, ?)",
-            (key, datetime.now(timezone.utc).isoformat()),
-        )
-
-
-def format_alert(local, foreign, calc):
-    lines = [
-        "⚠️ POTENTIAL 1X2 SURE BET — VERIFY FIRST",
-        f"{local['home']} vs {local['away']}",
-        f"League: {local.get('league') or 'Unknown'}",
-        f"Theoretical ROI: {calc['roi']:.2f}%",
-        f"Calculation bankroll: {BANKROLL:,.2f}",
-        "",
-    ]
-
-    for outcome in OUTCOMES:
-        odd, source = calc["best"][outcome]
-        lines.append(
-            f"{LABELS[outcome]}: {odd:.3f} @ {source} | "
-            f"Stake: {calc['stakes'][outcome]:,.2f}"
-        )
-
-    lines.extend([
-        "",
-        f"Estimated return: {calc['min_return']:,.2f}",
-        f"Estimated profit before fees: {calc['profit']:,.2f}",
-        f"Sources: {local['source']} + {foreign['source']}",
-        "Odds can change; verify all prices, rules and limits.",
-        "No bets are placed automatically.",
-    ])
-
-    return "\n".join(lines)
-
-
-def run_once():
+def main() -> int:
+    bankroll = env_float("BANKROLL_NGN", 20000.0)
+    min_roi = env_float("MIN_ARBITRAGE_ROI", 0.5)
+    max_roi = env_float("MAX_ARBITRAGE_ROI", 30.0)
     init_db()
+    send_telegram("Football-tool scanner started. Read-only mode; no bets are placed.")
+    try:
+        with httpx.Client(timeout=httpx.Timeout(25.0), follow_redirects=True) as client:
+            foreign_events = get_odds_api_events(client)
+            sporty_events = get_sportybet_events(client)
+    except Exception as exc:
+        msg = f"Football-tool scan error: {type(exc).__name__}: {exc}"
+        print(msg, file=sys.stderr)
+        send_telegram(msg)
+        return 1
 
-    with httpx.Client(
-        timeout=20,
-        follow_redirects=True,
-        headers={"User-Agent": "SportsValueEngine/1.0"},
-    ) as client:
-        local_events = fetch_sportybet(client)
-        foreign_events = fetch_foreign(client)
-
-        matches = 0
-        alerts = 0
-
-        for local in local_events:
-            for foreign in foreign_events:
-                if not events_match(local, foreign):
-                    continue
-
-                matches += 1
-                calc = calculate_surebet(local, foreign, BANKROLL)
-
-                if not calc:
-                    continue
-
-                if not MIN_ROI <= calc["roi"] <= MAX_ROI:
-                    continue
-
-                key = signal_key(local, calc)
-
-                if was_sent(key):
-                    continue
-
-                send_telegram(client, format_alert(local, foreign, calc))
-                record_sent(key)
-                alerts += 1
-
-        log.info(
-            "Scan finished. Local=%d Foreign=%d Matched=%d Alerts=%d",
-            len(local_events), len(foreign_events), matches, alerts,
+    candidates = []
+    for se in sporty_events:
+        for fe in foreign_events:
+            if not match_events(se, fe):
+                continue
+            best = best_foreign_1x2(fe)
+            if not best:
+                continue
+            chosen = {}
+            sources = {}
+            # For each outcome, choose best price from SportyBet and external bookies.
+            for outcome in ("home", "draw", "away"):
+                sport_price = se["odds"][outcome]
+                foreign_price = best[outcome]["price"]
+                if sport_price >= foreign_price:
+                    chosen[outcome] = sport_price
+                    sources[outcome] = "SportyBet"
+                else:
+                    chosen[outcome] = foreign_price
+                    sources[outcome] = best[outcome]["bookmaker"]
+            calc = calculate_arbitrage(chosen, bankroll)
+            if calc and min_roi <= calc["roi_pct"] <= max_roi:
+                candidates.append((se, chosen, sources, calc))
+    sent = 0
+    for se, odds, sources, calc in candidates:
+        key = alert_key(se["home"], se["away"], se.get("kickoff", ""), odds)
+        if already_sent(key):
+            continue
+        text = (
+            f"⚠️ THEORETICAL 1X2 ARBITRAGE — VERIFY BEFORE ACTION\n"
+            f"{se['home']} vs {se['away']}\nKickoff: {se.get('kickoff') or 'unknown'}\n"
+            f"Home: {odds['home']:.3f} ({sources['home']}) — stake {fmt_money(calc['stakes']['home'])}\n"
+            f"Draw: {odds['draw']:.3f} ({sources['draw']}) — stake {fmt_money(calc['stakes']['draw'])}\n"
+            f"Away: {odds['away']:.3f} ({sources['away']}) — stake {fmt_money(calc['stakes']['away'])}\n"
+            f"Estimated theoretical ROI: {calc['roi_pct']:.2f}%\n"
+            f"Bankroll assumed: {fmt_money(bankroll)}; theoretical min return: {fmt_money(calc['min_return'])}; "
+            f"gross profit before limits/fees/settlement risk: {fmt_money(calc['profit'])}\n"
+            f"Implied probability sum: {calc['implied_sum']*100:.3f}%\n"
+            f"Confirm live prices, identical market/settlement rules, stake limits and availability manually."
         )
-
+        if send_telegram(text):
+            mark_sent(key); sent += 1
+    summary = (f"Football-tool scan complete: SportyBet events={len(sporty_events)}, "
+               f"external events={len(foreign_events)}, matched alerts candidates={len(candidates)}, "
+               f"new Telegram alerts sent={sent}.")
+    print(summary)
+    send_telegram(summary)
+    return 0
 
 if __name__ == "__main__":
-    try:
-        run_once()
-    except Exception:
-        log.exception("Scanner failed.")
-        raise
+    raise SystemExit(main())
