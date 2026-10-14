@@ -1,6 +1,6 @@
 
 """
-Football-tool — read-only 1X2 arbitrage scanner
+Football-tool: read-only 1X2 arbitrage scanner
 Python 3.11+
 
 Required environment variables:
@@ -10,11 +10,11 @@ Required environment variables:
 
 Optional environment variables:
   SPORTYBET_ENABLED=true
-  SPORTYBET_URL=<your verified SportyBet JSON endpoint>
-  SPORTYBET_API_KEY=<if your endpoint requires an API key>
-  SPORTYBET_AUTH_MODE=bearer   # bearer, x-api-key, or none
+  SPORTYBET_URL=https://www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents
+  SPORTYBET_AUTH_MODE=none
   SPORTYBET_TIMEOUT=15
-  SPORTYBET_MIN_EVENTS=1
+  SPORTYBET_PAGE_SIZE=100
+  SPORTYBET_TIMELINE=48
   SPORT_KEY=soccer_epl
   ODDS_REGIONS=uk,eu
   BANKROLLPOOL=20000
@@ -23,14 +23,12 @@ Optional environment variables:
   TIMELINE_HOURS=48
   LOG_LEVEL=INFO
 
-This program never places bets.
-SportyBet endpoint and response schema must be verified.
+No bets are placed.
 """
 
+import logging
 import os
 import re
-import json
-import logging
 import unicodedata
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -44,17 +42,27 @@ ODDS_API_KEY = os.getenv("ODDS_API_KEY", "").strip()
 TELEGRAM_TOKEN = os.getenv("TELEGRAMBOTTOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TARGETCHATID", "").strip()
 
-SPORTYBET_ENABLED = (
-    os.getenv("SPORTYBET_ENABLED", "true").strip().lower()
-    in {"1", "true", "yes", "on"}
-)
-SPORTYBET_URL = os.getenv("SPORTYBET_URL", "").strip()
+SPORTYBET_ENABLED = os.getenv(
+    "SPORTYBET_ENABLED", "true"
+).lower() in {"true", "1", "yes", "on"}
+
+SPORTYBET_URL = os.getenv(
+    "SPORTYBET_URL",
+    "https://www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents",
+).strip()
+
+SPORTYBET_AUTH_MODE = os.getenv(
+    "SPORTYBET_AUTH_MODE", "none"
+).lower().strip()
+
 SPORTYBET_API_KEY = os.getenv("SPORTYBET_API_KEY", "").strip()
-SPORTYBET_AUTH_MODE = (
-    os.getenv("SPORTYBET_AUTH_MODE", "bearer").strip().lower()
-)
 SPORTYBET_TIMEOUT = float(os.getenv("SPORTYBET_TIMEOUT", "15"))
-SPORTYBET_MIN_EVENTS = int(os.getenv("SPORTYBET_MIN_EVENTS", "1"))
+SPORTYBET_PAGE_SIZE = min(
+    100, max(1, int(os.getenv("SPORTYBET_PAGE_SIZE", "100")))
+)
+SPORTYBET_TIMELINE = min(
+    720, max(1, int(os.getenv("SPORTYBET_TIMELINE", "48")))
+)
 
 SPORT_KEY = os.getenv("SPORT_KEY", "soccer_epl").strip()
 ODDS_REGIONS = os.getenv("ODDS_REGIONS", "uk,eu").strip()
@@ -65,8 +73,7 @@ MAX_ROI = float(os.getenv("MAX_ARBITRAGE_ROI", "30"))
 TIMELINE_HOURS = float(os.getenv("TIMELINE_HOURS", "48"))
 
 ODDS_API_URL = (
-    "https://api.the-odds-api.com/v4/sports/"
-    f"{SPORT_KEY}/odds/"
+    f"https://api.the-odds-api.com/v4/sports/{SPORT_KEY}/odds/"
 )
 
 logging.basicConfig(
@@ -81,69 +88,95 @@ HTTP_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
 # ---------------- GENERAL HELPERS ----------------
 
 def normalize_team(name):
-    """Normalize team names for conservative event matching."""
     if not isinstance(name, str):
         return ""
 
     name = unicodedata.normalize("NFKD", name)
-    name = "".join(c for c in name if not unicodedata.combining(c))
+    name = "".join(
+        c for c in name if not unicodedata.combining(c)
+    )
     name = name.lower().replace("&", " and ")
     name = re.sub(
-        r"\b(fc|afc|cf|sc|club|football club|the)\b", " ", name
+        r"\b(fc|afc|cf|sc|club|football club|the)\b",
+        " ",
+        name,
     )
     return re.sub(r"[^a-z0-9]+", "", name)
 
 
-def team_similarity(a, b):
-    a = normalize_team(a)
-    b = normalize_team(b)
-    if not a or not b:
+def team_similarity(first, second):
+    first = normalize_team(first)
+    second = normalize_team(second)
+
+    if not first or not second:
         return 0.0
-    if a == b:
+    if first == second:
         return 1.0
-    return SequenceMatcher(None, a, b).ratio()
+
+    return SequenceMatcher(None, first, second).ratio()
 
 
 def safe_float(value):
     try:
-        result = float(value)
-        if result > 1.0 and result < float("inf"):
-            return result
+        number = float(value)
+        if number > 1 and number != float("inf"):
+            return number
     except (TypeError, ValueError, OverflowError):
         pass
     return None
 
 
-def parse_time(value):
-    if not value:
+def parse_datetime(value):
+    if value is None:
         return None
+
     try:
-        value = str(value).strip().replace("Z", "+00:00")
-        dt = datetime.fromisoformat(value)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
-    except (TypeError, ValueError):
+        # SportyBet estimateStartTime is commonly Unix milliseconds.
+        if isinstance(value, (int, float)):
+            seconds = value / 1000 if value > 10_000_000_000 else value
+            return datetime.fromtimestamp(seconds, tz=timezone.utc)
+
+        text = str(value).strip()
+        if text.isdigit():
+            number = int(text)
+            seconds = (
+                number / 1000
+                if number > 10_000_000_000
+                else number
+            )
+            return datetime.fromtimestamp(seconds, tz=timezone.utc)
+
+        text = text.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+
+        return parsed.astimezone(timezone.utc)
+
+    except (ValueError, TypeError, OverflowError, OSError):
         return None
 
 
-def event_is_in_window(event):
-    """Keep events with unknown times; filter known distant/past events."""
-    kickoff = parse_time(event.get("commence_time"))
+def event_in_window(event):
+    kickoff = parse_datetime(event.get("commence_time"))
+
+    # Keep unknown times rather than silently discarding them.
     if kickoff is None:
         return True
 
-    now = datetime.now(timezone.utc)
-    hours = (kickoff - now).total_seconds() / 3600
+    hours = (
+        kickoff - datetime.now(timezone.utc)
+    ).total_seconds() / 3600
+
     return 0 <= hours <= TIMELINE_HOURS
 
 
-# ---------------- HTTP / TELEGRAM ----------------
+# ---------------- SAFE HTTP REQUESTS ----------------
 
-def request_json(url, params=None, headers=None, timeout=None, source="API"):
+def get_json(url, params=None, headers=None, source="API", timeout=None):
     """
-    Fetch JSON safely. Never logs the full URL, query parameters,
-    authentication headers, or response body.
+    Fetch JSON without logging credentials, full URLs, or response bodies.
     """
     try:
         with httpx.Client(
@@ -157,45 +190,36 @@ def request_json(url, params=None, headers=None, timeout=None, source="API"):
             )
 
         content_type = response.headers.get("content-type", "")
-        body = response.content
 
         log.info(
-            "%s response: status=%s content_type=%s bytes=%s",
+            "%s HTTP status=%s content_type=%s response_bytes=%s",
             source,
             response.status_code,
             content_type.split(";")[0],
-            len(body),
+            len(response.content),
         )
 
-        if response.status_code < 200 or response.status_code >= 300:
+        if not 200 <= response.status_code < 300:
             log.warning("%s returned a non-success HTTP status.", source)
             return None
 
         try:
             payload = response.json()
-        except (json.JSONDecodeError, ValueError):
-            log.warning(
-                "%s response is not valid JSON. Check endpoint, "
-                "redirects, access restrictions, and response format.",
-                source,
-            )
+        except ValueError:
+            log.warning("%s returned non-JSON content.", source)
             return None
 
         if isinstance(payload, dict):
             log.info(
-                "%s JSON top-level keys: %s",
+                "%s top-level keys=%s",
                 source,
-                list(payload.keys())[:40],
+                list(payload.keys())[:30],
             )
         elif isinstance(payload, list):
-            log.info(
-                "%s JSON top-level list length: %s",
-                source,
-                len(payload),
-            )
+            log.info("%s top-level list length=%d", source, len(payload))
         else:
             log.info(
-                "%s JSON top-level type: %s",
+                "%s top-level type=%s",
                 source,
                 type(payload).__name__,
             )
@@ -205,10 +229,17 @@ def request_json(url, params=None, headers=None, timeout=None, source="API"):
     except httpx.TimeoutException:
         log.warning("%s request timed out.", source)
     except httpx.HTTPError as exc:
-        # Exception text can contain URLs. Do not print it verbatim.
-        log.warning("%s HTTP request failed (%s).", source, type(exc).__name__)
+        log.warning(
+            "%s HTTP failure (%s).",
+            source,
+            type(exc).__name__,
+        )
     except Exception as exc:
-        log.error("%s unexpected request error (%s).", source, type(exc).__name__)
+        log.error(
+            "%s unexpected request failure (%s).",
+            source,
+            type(exc).__name__,
+        )
 
     return None
 
@@ -218,7 +249,11 @@ def send_telegram(message):
         log.info("Telegram not configured; alert skipped.")
         return False
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    url = (
+        "https://api.telegram.org/bot"
+        + TELEGRAM_TOKEN
+        + "/sendMessage"
+    )
 
     try:
         with httpx.Client(timeout=HTTP_TIMEOUT) as client:
@@ -238,11 +273,7 @@ def send_telegram(message):
             )
             return False
 
-        try:
-            result = response.json()
-        except ValueError:
-            log.warning("Telegram returned an unexpected response.")
-            return False
+        result = response.json()
 
         if not result.get("ok"):
             log.warning("Telegram did not accept the message.")
@@ -250,8 +281,11 @@ def send_telegram(message):
 
         return True
 
-    except httpx.HTTPError as exc:
-        log.warning("Telegram request failed (%s).", type(exc).__name__)
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning(
+            "Telegram request failed (%s).",
+            type(exc).__name__,
+        )
         return False
 
 
@@ -259,10 +293,10 @@ def send_telegram(message):
 
 def fetch_odds_events():
     if not ODDS_API_KEY:
-        log.error("Missing ODDS_API_KEY environment variable.")
+        log.error("ODDS_API_KEY is missing.")
         return []
 
-    payload = request_json(
+    payload = get_json(
         ODDS_API_URL,
         params={
             "apiKey": ODDS_API_KEY,
@@ -274,7 +308,7 @@ def fetch_odds_events():
     )
 
     if not isinstance(payload, list):
-        log.error("The Odds API did not return an event list.")
+        log.error("The Odds API response is not an event list.")
         return []
 
     events = []
@@ -295,31 +329,29 @@ def fetch_odds_events():
             if not isinstance(bookmaker, dict):
                 continue
 
-            bookmaker_name = bookmaker.get("title") or bookmaker.get("key", "")
+            book_name = (
+                bookmaker.get("title")
+                or bookmaker.get("key")
+                or "Unknown bookmaker"
+            )
 
             for market in bookmaker.get("markets", []) or []:
                 if market.get("key") != "h2h":
                     continue
 
                 for outcome in market.get("outcomes", []) or []:
-                    label = str(outcome.get("name", "")).strip()
+                    name = str(outcome.get("name", "")).strip()
                     price = safe_float(outcome.get("price"))
 
                     if price is None:
                         continue
 
-                    if label.lower() == str(home).lower():
-                        outcomes["home"].append(
-                            (price, bookmaker_name)
-                        )
-                    elif label.lower() == str(away).lower():
-                        outcomes["away"].append(
-                            (price, bookmaker_name)
-                        )
-                    elif label.lower() in {"draw", "tie"}:
-                        outcomes["draw"].append(
-                            (price, bookmaker_name)
-                        )
+                    if name.casefold() == str(home).casefold():
+                        outcomes["home"].append((price, book_name))
+                    elif name.casefold() == str(away).casefold():
+                        outcomes["away"].append((price, book_name))
+                    elif name.casefold() in {"draw", "tie"}:
+                        outcomes["draw"].append((price, book_name))
 
         events.append({
             "id": raw.get("id"),
@@ -329,367 +361,296 @@ def fetch_odds_events():
             "outcomes": outcomes,
         })
 
-    log.info("The Odds API events: %s", len(events))
+    log.info("The Odds API events: %d", len(events))
     return events
 
 
-# ---------------- SPORTYBET DIAGNOSTICS ----------------
+# ---------------- SPORTYBET FETCH ----------------
 
 def fetch_sportybet_payload():
     if not SPORTYBET_ENABLED:
         log.info("SportyBet integration disabled.")
         return None
 
-    if not SPORTYBET_URL:
-        log.warning(
-            "SPORTYBET_URL is not configured. SportyBet was not queried. "
-            "Set it to a verified endpoint returning JSON."
-        )
-        return None
-
     headers = {
         "Accept": "application/json",
+        "Current-Country": "NG",
         "User-Agent": "Football-tool-readonly-scanner/1.0",
     }
 
-    if SPORTYBET_API_KEY:
-        if SPORTYBET_AUTH_MODE == "bearer":
-            headers["Authorization"] = f"Bearer {SPORTYBET_API_KEY}"
-        elif SPORTYBET_AUTH_MODE == "x-api-key":
-            headers["x-api-key"] = SPORTYBET_API_KEY
-        elif SPORTYBET_AUTH_MODE == "none":
-            pass
-        else:
-            log.warning(
-                "Unknown SPORTYBET_AUTH_MODE; no API-key header added."
-            )
+    # This endpoint is reported as unauthenticated.
+    # Do not supply a browser session token.
+    if SPORTYBET_AUTH_MODE == "bearer" and SPORTYBET_API_KEY:
+        headers["Authorization"] = f"Bearer {SPORTYBET_API_KEY}"
+    elif SPORTYBET_AUTH_MODE == "x-api-key" and SPORTYBET_API_KEY:
+        headers["x-api-key"] = SPORTYBET_API_KEY
+    elif SPORTYBET_AUTH_MODE not in {"none", "bearer", "x-api-key"}:
+        log.error("Unsupported SPORTYBET_AUTH_MODE.")
+        return None
 
-    payload = request_json(
+    params = {
+        "sportId": "sr:sport:1",
+        "marketId": "1",
+        "pageSize": SPORTYBET_PAGE_SIZE,
+        "pageNum": 1,
+        "todayGames": "false",
+        "timeline": SPORTYBET_TIMELINE,
+        "_t": int(datetime.now(timezone.utc).timestamp() * 1000),
+    }
+
+    return get_json(
         SPORTYBET_URL,
+        params=params,
         headers=headers,
+        source="SportyBet",
         timeout=httpx.Timeout(
             SPORTYBET_TIMEOUT,
-            connect=min(SPORTYBET_TIMEOUT, 10.0),
+            connect=min(10.0, SPORTYBET_TIMEOUT),
         ),
-        source="SportyBet",
     )
-
-    if payload is None:
-        log.warning(
-            "SportyBet payload unavailable. The Odds API scan will continue."
-        )
-
-    return payload
 
 
 # ---------------- SPORTYBET PARSER ----------------
 
-HOME_KEYS = {
-    "home", "hometeam", "home_team", "homeTeam",
-    "homeName", "host", "hostName",
-}
-AWAY_KEYS = {
-    "away", "awayteam", "away_team", "awayTeam",
-    "awayName", "guest", "guestName",
-}
-DRAW_KEYS = {"draw", "tie", "x"}
-EVENT_LIST_KEYS = {
-    "events", "matches", "data", "fixtures", "results",
-    "eventList", "matchList", "records",
-}
-
-
-def get_first(mapping, candidates):
-    if not isinstance(mapping, dict):
-        return None
-
-    # Exact keys first, then case-insensitive matching.
-    for key in candidates:
-        if key in mapping:
-            return mapping[key]
-
-    lowered = {str(k).lower(): v for k, v in mapping.items()}
-    for key in candidates:
-        if str(key).lower() in lowered:
-            return lowered[str(key).lower()]
-
-    return None
-
-
-def extract_team_names(event):
-    home = get_first(event, HOME_KEYS)
-    away = get_first(event, AWAY_KEYS)
-
-    # Common nested forms: {"home": {"name": "..."}, ...}
-    if isinstance(home, dict):
-        home = get_first(home, {"name", "teamName", "label", "title"})
-    if isinstance(away, dict):
-        away = get_first(away, {"name", "teamName", "label", "title"})
-
-    # Some feeds put teams in a two-element list.
-    if (not home or not away) and isinstance(event.get("teams"), list):
-        teams = event["teams"]
-        if len(teams) >= 2:
-            def team_name(item):
-                if isinstance(item, str):
-                    return item
-                if isinstance(item, dict):
-                    return get_first(
-                        item, {"name", "teamName", "label", "title"}
-                    )
-                return None
-
-            home = home or team_name(teams[0])
-            away = away or team_name(teams[1])
-
-    if not isinstance(home, str) or not isinstance(away, str):
-        return None, None
-
-    if not home.strip() or not away.strip():
-        return None, None
-
-    return home.strip(), away.strip()
-
-
-def extract_event_time(event):
-    return (
-        get_first(
-            event,
+def iter_sportybet_events(payload):
+    """
+    Expected common response shape:
+      {
+        "bizCode": 10000,
+        "data": {
+          "tournaments": [
             {
-                "commence_time", "startTime", "start_time", "matchTime",
-                "kickoff", "kickOff", "eventDate", "date",
-            },
-        )
-    )
+              "name": "...",
+              "events": [
+                {
+                  "eventId": "...",
+                  "homeTeamName": "...",
+                  "awayTeamName": "...",
+                  "estimateStartTime": 1234567890000,
+                  "markets": [...]
+                }
+              ]
+            }
+          ]
+        }
+      }
 
-
-def extract_market_container(event):
+    Also tolerates a flat events list when present.
     """
-    Return likely odds/markets containers without assuming one exact schema.
-    """
-    containers = []
+    if not isinstance(payload, dict):
+        return
 
-    for key in (
-        "odds", "markets", "market", "oddsList",
-        "marketList", "betTypes", "selections",
-    ):
-        value = get_first(event, {key})
-        if isinstance(value, (dict, list)):
-            containers.append(value)
+    data = payload.get("data", payload)
 
-    return containers
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                yield item
+        return
 
+    if not isinstance(data, dict):
+        return
 
-def outcome_label(value):
-    text = str(value or "").strip().lower()
-    compact = re.sub(r"[^a-z0-9]+", "", text)
+    tournaments = data.get("tournaments")
 
-    if compact in {"1", "home", "hometeam", "1x2home"}:
-        return "home"
-    if compact in {"x", "draw", "tie"}:
-        return "draw"
-    if compact in {"2", "away", "awayteam", "1x2away"}:
-        return "away"
+    if isinstance(tournaments, list):
+        for tournament in tournaments:
+            if not isinstance(tournament, dict):
+                continue
 
-    return None
+            events = tournament.get("events", [])
 
+            if not isinstance(events, list):
+                continue
 
-def parse_outcome_price(item, key_hint=None):
-    """
-    Parse common representations such as:
-      {"name": "Home", "odds": 2.2}
-      {"label": "Draw", "price": 3.1}
-      {"outcome": "Away", "value": "3.4"}
-      {"home": 2.2, "draw": 3.1, "away": 3.4}
-    """
-    if isinstance(item, (int, float, str)):
-        label = outcome_label(key_hint)
-        price = safe_float(item)
-        return (label, price) if label and price else (None, None)
-
-    if not isinstance(item, dict):
-        return None, None
-
-    label = get_first(
-        item,
-        {
-            "name", "label", "outcome", "selection", "selectionName",
-            "title", "key", "type", "marketName",
-        },
-    )
-
-    if label is None:
-        label = key_hint
-
-    # Market names can contain 1X2, so prefer explicit selection labels.
-    label = outcome_label(label)
-
-    price = get_first(
-        item,
-        {
-            "odds", "odd", "price", "decimalOdds", "decimal_odd",
-            "value", "oddsValue", "fixedOdds",
-        },
-    )
-    price = safe_float(price)
-
-    return (label, price) if label and price else (None, None)
-
-
-def parse_sportybet_event(event):
-    """
-    Best-effort parser. Unrecognized event structures are skipped,
-    not guessed. Log schema keys to help build a verified parser.
-    """
-    if not isinstance(event, dict):
-        return None
-
-    home, away = extract_team_names(event)
-    if not home or not away:
-        return None
-
-    outcomes = {"home": None, "draw": None, "away": None}
-
-    # First: direct 1X2 dictionaries.
-    for container in extract_market_container(event):
-        if isinstance(container, dict):
-            for key, value in container.items():
-                label = outcome_label(key)
-                if label:
-                    if isinstance(value, dict):
-                        _, price = parse_outcome_price(value, key)
-                    else:
-                        price = safe_float(value)
-
-                    if price:
-                        outcomes[label] = max(
-                            outcomes[label] or 0, price
-                        )
-
-        elif isinstance(container, list):
-            for item in container:
-                label, price = parse_outcome_price(item)
-                if label and price:
-                    outcomes[label] = max(
-                        outcomes[label] or 0, price
+            for event in events:
+                if isinstance(event, dict):
+                    # Carry competition name as useful context.
+                    event = dict(event)
+                    event["_tournament_name"] = (
+                        tournament.get("name")
+                        or tournament.get("categoryName")
+                        or ""
                     )
+                    yield event
 
-                # A market may wrap its selections in a nested list.
-                if isinstance(item, dict):
-                    for nested_key in (
-                        "outcomes", "selections", "options", "oddsList",
-                    ):
-                        nested = item.get(nested_key)
-                        if isinstance(nested, list):
-                            for selection in nested:
-                                label, price = parse_outcome_price(selection)
-                                if label and price:
-                                    outcomes[label] = max(
-                                        outcomes[label] or 0, price
-                                    )
+    # Some response versions use a flat list.
+    for key in ("events", "matches", "eventList", "matchList"):
+        events = data.get(key)
 
-    # Also inspect simple direct outcome fields on the event itself.
-    for label, aliases in {
-        "home": {"homeOdds", "home_odds", "oddsHome"},
-        "draw": {"drawOdds", "draw_odds", "oddsDraw"},
-        "away": {"awayOdds", "away_odds", "oddsAway"},
-    }.items():
-        direct = safe_float(get_first(event, aliases))
-        if direct:
-            outcomes[label] = max(outcomes[label] or 0, direct)
-
-    if not all(outcomes[k] and outcomes[k] > 1 for k in ("home", "draw", "away")):
-        return None
-
-    return {
-        "id": get_first(event, {"eventId", "matchId", "id", "event_id"}),
-        "home_team": home,
-        "away_team": away,
-        "commence_time": extract_event_time(event),
-        "outcomes": outcomes,
-    }
+        if isinstance(events, list):
+            for event in events:
+                if isinstance(event, dict):
+                    yield event
 
 
-def find_event_lists(payload):
-    """Find lists likely to contain events without recursively dumping payloads."""
-    if isinstance(payload, list):
-        if payload and all(isinstance(item, dict) for item in payload):
-            return [payload]
+def extract_sportybet_1x2(event):
+    """
+    SportyBet 1X2 outcome IDs commonly used by the reference:
+      1 = Home, 2 = Draw, 3 = Away
 
-        lists = []
-        for item in payload:
-            lists.extend(find_event_lists(item))
-        return lists
+    Market ID 1 is the requested market. Descriptions are also checked.
+    """
+    result = {"home": None, "draw": None, "away": None}
+    markets = event.get("markets", [])
 
-    if isinstance(payload, dict):
-        found = []
+    if not isinstance(markets, list):
+        return result
 
-        for key, value in payload.items():
-            if str(key).lower() in {k.lower() for k in EVENT_LIST_KEYS}:
-                if isinstance(value, list):
-                    found.append(value)
-                elif isinstance(value, dict):
-                    found.extend(find_event_lists(value))
+    for market in markets:
+        if not isinstance(market, dict):
+            continue
 
-        if found:
-            return found
+        market_id = str(market.get("id", market.get("marketId", "")))
+        market_desc = str(
+            market.get("desc", market.get("name", ""))
+        ).casefold()
 
-        # Some APIs wrap the response in an unnamed object.
-        for value in payload.values():
-            if isinstance(value, (dict, list)):
-                found.extend(find_event_lists(value))
-        return found
+        # Market ID 1 is the commonly reported 1X2 market.
+        # Description fallback helps when the provider changes IDs.
+        is_1x2 = (
+            market_id == "1"
+            or "1x2" in market_desc
+            or "match result" in market_desc
+            or "full time result" in market_desc
+        )
 
-    return []
+        if not is_1x2:
+            continue
+
+        market_status = str(market.get("status", "")).casefold()
+        if market_status in {"0", "closed", "suspended", "inactive"}:
+            continue
+
+        outcomes = market.get("outcomes", [])
+
+        if not isinstance(outcomes, list):
+            continue
+
+        for outcome in outcomes:
+            if not isinstance(outcome, dict):
+                continue
+
+            active = outcome.get("isActive", True)
+            if active is False or str(active).casefold() in {
+                "false", "0", "no"
+            }:
+                continue
+
+            odds = safe_float(outcome.get("odds"))
+            if odds is None:
+                continue
+
+            outcome_id = str(
+                outcome.get("id", outcome.get("outcomeId", ""))
+            ).strip()
+
+            desc = str(
+                outcome.get("desc", outcome.get("name", ""))
+            ).strip().casefold()
+
+            if outcome_id == "1" or desc in {
+                "home", "1", "home win", "1x2 home"
+            }:
+                result["home"] = max(
+                    result["home"] or 0, odds
+                )
+            elif outcome_id == "2" or desc in {
+                "draw", "x", "tie"
+            }:
+                result["draw"] = max(
+                    result["draw"] or 0, odds
+                )
+            elif outcome_id == "3" or desc in {
+                "away", "2", "away win", "1x2 away"
+            }:
+                result["away"] = max(
+                    result["away"] or 0, odds
+                )
+
+    return result
 
 
 def fetch_sportybet_events():
     payload = fetch_sportybet_payload()
+
     if payload is None:
+        log.warning("SportyBet payload unavailable.")
         return []
 
-    candidate_lists = find_event_lists(payload)
+    if isinstance(payload, dict):
+        biz_code = payload.get("bizCode")
+        if biz_code is not None and str(biz_code) != "10000":
+            log.warning(
+                "SportyBet reported a non-success business code: %s",
+                biz_code,
+            )
 
-    if not candidate_lists:
+    raw_events = list(iter_sportybet_events(payload) or [])
+    log.info("SportyBet raw event records found: %d", len(raw_events))
+
+    if not raw_events:
         if isinstance(payload, dict):
-            log.warning(
-                "SportyBet JSON had no recognizable event list. "
-                "Top-level keys: %s",
-                list(payload.keys())[:40],
-            )
-        else:
-            log.warning(
-                "SportyBet JSON structure did not contain a recognizable event list."
-            )
+            data = payload.get("data")
+            if isinstance(data, dict):
+                log.warning(
+                    "SportyBet data keys: %s",
+                    list(data.keys())[:30],
+                )
+        log.warning(
+            "No SportyBet events found. Response schema may have changed."
+        )
         return []
 
     parsed = []
     seen = set()
+    missing_1x2 = 0
+    missing_teams = 0
 
-    for candidate_list in candidate_lists:
-        for raw_event in candidate_list:
-            event = parse_sportybet_event(raw_event)
-            if not event:
-                continue
+    for raw in raw_events:
+        home = raw.get("homeTeamName") or raw.get("home_team")
+        away = raw.get("awayTeamName") or raw.get("away_team")
 
-            key = (
-                normalize_team(event["home_team"]),
-                normalize_team(event["away_team"]),
-            )
-            if key in seen:
-                continue
+        if not isinstance(home, str) or not isinstance(away, str):
+            missing_teams += 1
+            continue
 
-            seen.add(key)
-            parsed.append(event)
+        home = home.strip()
+        away = away.strip()
 
-    log.info("SportyBet events parsed: %s", len(parsed))
+        if not home or not away:
+            missing_teams += 1
+            continue
 
-    if len(parsed) < SPORTYBET_MIN_EVENTS:
-        log.warning(
-            "SportyBet parsed fewer than the configured minimum (%s). "
-            "Check the actual response schema and 1X2 market fields.",
-            SPORTYBET_MIN_EVENTS,
-        )
+        prices = extract_sportybet_1x2(raw)
+
+        if not all(prices.get(k) for k in ("home", "draw", "away")):
+            missing_1x2 += 1
+            continue
+
+        key = (normalize_team(home), normalize_team(away))
+        if key in seen:
+            continue
+        seen.add(key)
+
+        parsed.append({
+            "id": raw.get("eventId") or raw.get("id"),
+            "home_team": home,
+            "away_team": away,
+            "commence_time": raw.get(
+                "estimateStartTime",
+                raw.get("startTime", raw.get("commence_time")),
+            ),
+            "tournament": raw.get("_tournament_name", ""),
+            "outcomes": prices,
+        })
+
+    log.info("SportyBet events parsed: %d", len(parsed))
+    log.info(
+        "SportyBet skipped: missing_teams=%d missing_complete_1x2=%d",
+        missing_teams,
+        missing_1x2,
+    )
 
     return parsed
 
@@ -697,10 +658,7 @@ def fetch_sportybet_events():
 # ---------------- MATCHING / ARBITRAGE ----------------
 
 def events_match(odds_event, sporty_event):
-    """
-    Require both home and away teams to match in the same orientation.
-    Conservative matching avoids reversing home/away by mistake.
-    """
+    # Conservative matching: home must match home and away must match away.
     home_score = team_similarity(
         odds_event["home_team"], sporty_event["home_team"]
     )
@@ -711,12 +669,8 @@ def events_match(odds_event, sporty_event):
     return home_score >= 0.84 and away_score >= 0.84
 
 
-def best_market_prices(odds_event, sporty_event):
-    """
-    For each outcome, compare bookmaker prices from The Odds API
-    against the parsed SportyBet price.
-    """
-    result = {}
+def best_prices(odds_event, sporty_event):
+    best = {}
 
     for outcome in ("home", "draw", "away"):
         candidates = []
@@ -732,16 +686,12 @@ def best_market_prices(odds_event, sporty_event):
         if not candidates:
             return None
 
-        result[outcome] = max(candidates, key=lambda item: item[0])
+        best[outcome] = max(candidates, key=lambda item: item[0])
 
-    return result
+    return best
 
 
 def calculate_arbitrage(prices, bankroll):
-    """
-    Calculate theoretical dutching stakes.
-    Positive ROI requires the sum of inverse odds to be below 1.
-    """
     inverse_sum = sum(
         1.0 / prices[outcome][0]
         for outcome in ("home", "draw", "away")
@@ -750,10 +700,13 @@ def calculate_arbitrage(prices, bankroll):
     if inverse_sum <= 0:
         return None
 
-    roi_pct = ((1.0 / inverse_sum) - 1.0) * 100.0
+    # This is the mathematical margin before fees and execution risk.
+    roi_pct = (1.0 / inverse_sum - 1.0) * 100.0
 
     stakes = {
-        outcome: bankroll * (1.0 / prices[outcome][0]) / inverse_sum
+        outcome: bankroll
+        * (1.0 / prices[outcome][0])
+        / inverse_sum
         for outcome in ("home", "draw", "away")
     }
 
@@ -764,26 +717,28 @@ def calculate_arbitrage(prices, bankroll):
 
     return {
         "roi_pct": roi_pct,
-        "inverse_sum": inverse_sum,
         "stakes": stakes,
-        "payouts": payouts,
         "minimum_payout": min(payouts.values()),
         "theoretical_profit": min(payouts.values()) - bankroll,
     }
 
 
-def format_opportunity(odds_event, prices, result):
-    kickoff = odds_event.get("commence_time") or "Time not supplied"
+def format_alert(event, prices, result):
+    kickoff = parse_datetime(event.get("commence_time"))
+    kickoff_text = (
+        kickoff.strftime("%Y-%m-%d %H:%M UTC")
+        if kickoff
+        else "Unknown"
+    )
 
     lines = [
-        "⚽ THEORETICAL 1X2 ARBITRAGE",
-        f"{odds_event['home_team']} vs {odds_event['away_team']}",
-        f"Kickoff: {kickoff}",
-        f"Bankroll assumption: {BANKROLL:.2f}",
-        f"Estimated ROI before fees: {result['roi_pct']:.2f}%",
+        "THEORETICAL 1X2 ARBITRAGE",
+        f"{event['home_team']} vs {event['away_team']}",
+        f"Kickoff: {kickoff_text}",
+        f"ROI before fees: {result['roi_pct']:.2f}%",
+        f"Assumed total stake: {BANKROLL:.2f}",
         f"Theoretical profit: {result['theoretical_profit']:.2f}",
         "",
-        "Outcome allocation:",
     ]
 
     for outcome, label in (
@@ -791,67 +746,70 @@ def format_opportunity(odds_event, prices, result):
         ("draw", "Draw"),
         ("away", "Away"),
     ):
-        price, bookmaker = prices[outcome]
+        odds, bookmaker = prices[outcome]
+        stake = result["stakes"][outcome]
         lines.append(
-            f"{label}: odds {price:.3f} at {bookmaker}; "
-            f"stake {result['stakes'][outcome]:.2f}"
+            f"{label}: {odds:.3f} @ {bookmaker}; stake {stake:.2f}"
         )
 
     lines.extend([
         "",
         "READ-ONLY ESTIMATE. No bets placed.",
-        "Verify live odds, limits, fees, and market settlement rules manually.",
+        "Verify current odds, limits, settlement rules and fees.",
     ])
 
     return "\n".join(lines)
 
 
+# ---------------- MAIN SCAN ----------------
+
 def scan():
-    log.info("Football-tool read-only scan started.")
+    log.info("Football-tool scan started.")
 
     odds_events = fetch_odds_events()
     sporty_events = fetch_sportybet_events()
 
-    log.info("The Odds API events: %s", len(odds_events))
-    log.info("SportyBet events parsed: %s", len(sporty_events))
+    log.info("The Odds API events: %d", len(odds_events))
+    log.info("SportyBet events parsed: %d", len(sporty_events))
 
     if not odds_events:
-        log.error("No reference events were retrieved.")
+        log.error("No The Odds API events retrieved.")
+        log.info("Qualifying theoretical opportunities: 0")
+        log.info("Read-only scanner. No bets placed.")
         return
 
     if not sporty_events:
         log.warning(
-            "No SportyBet events are available for comparison. "
-            "No cross-bookmaker arbitrage conclusion can be made."
+            "No SportyBet events available for comparison; "
+            "arbitrage opportunities cannot be assessed."
         )
         log.info("Qualifying theoretical opportunities: 0")
         log.info("Read-only scanner. No bets placed.")
         return
 
     qualifying = 0
-    checked_pairs = set()
 
     for odds_event in odds_events:
-        if not event_is_in_window(odds_event):
+        if not event_in_window(odds_event):
             continue
 
         for sporty_event in sporty_events:
             if not events_match(odds_event, sporty_event):
                 continue
 
-            pair_key = (
-                odds_event.get("id"),
-                sporty_event.get("id")
-                or (
-                    sporty_event["home_team"],
-                    sporty_event["away_team"],
-                ),
-            )
-            if pair_key in checked_pairs:
-                continue
-            checked_pairs.add(pair_key)
+            # Ignore events with different known kickoff times by > 6 hours.
+            t1 = parse_datetime(odds_event.get("commence_time"))
+            t2 = parse_datetime(sporty_event.get("commence_time"))
 
-            prices = best_market_prices(odds_event, sporty_event)
+            if t1 and t2 and abs((t1 - t2).total_seconds()) > 6 * 3600:
+                log.warning(
+                    "Potential name match rejected due to kickoff mismatch: %s vs %s",
+                    odds_event["home_team"],
+                    odds_event["away_team"],
+                )
+                continue
+
+            prices = best_prices(odds_event, sporty_event)
             if not prices:
                 continue
 
@@ -863,22 +821,18 @@ def scan():
 
             if MIN_ROI <= roi <= MAX_ROI:
                 qualifying += 1
-                message = format_opportunity(
-                    odds_event, prices, result
-                )
+                alert = format_alert(odds_event, prices, result)
+
                 log.info(
-                    "Qualifying theoretical opportunity: %s vs %s; ROI %.2f%%",
+                    "Qualifying theoretical opportunity: %s vs %s, ROI %.2f%%",
                     odds_event["home_team"],
                     odds_event["away_team"],
                     roi,
                 )
-                log.info("%s", message)
-                send_telegram(message)
+                log.info("%s", alert)
+                send_telegram(alert)
 
-    log.info(
-        "Qualifying theoretical opportunities: %s",
-        qualifying,
-    )
+    log.info("Qualifying theoretical opportunities: %d", qualifying)
     log.info("Read-only scanner. No bets placed.")
 
 
@@ -886,9 +840,9 @@ if __name__ == "__main__":
     try:
         scan()
     except KeyboardInterrupt:
-        log.info("Scanner interrupted by user.")
+        log.info("Scanner interrupted.")
     except Exception as exc:
         log.exception(
-            "Scanner stopped due to an unexpected error (%s).",
+            "Scanner failed unexpectedly (%s).",
             type(exc).__name__,
         )
