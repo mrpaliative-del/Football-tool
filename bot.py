@@ -98,21 +98,45 @@ def fetch_sportybet_accumulator_candidates():
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True, 
-                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+                args=[
+                    "--no-sandbox", 
+                    "--disable-setuid-sandbox", 
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled"
+                ]
             )
-            context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 800}
+            )
             page = context.new_page()
             
-            page.goto("https://www.sportybet.com/ng/", wait_until="domcontentloaded", timeout=35000)
-            time.sleep(3)
+            log.info("Navigating to SportyBet...")
+            page.goto("https://www.sportybet.com/ng/", wait_until="domcontentloaded", timeout=45000)
+            time.sleep(5)  # Allow cookies/Cloudflare challenge to settle
 
-            response = page.request.get(f"{SPORTYBET_URL}?pageSize=100&timeline=48")
+            target_url = f"{SPORTYBET_URL}?pageSize=100&timeline=48"
+            log.info("Fetching odds endpoint: %s", target_url)
+            response = page.request.get(target_url)
+
             if response.status >= 400:
+                log.warning("SportyBet HTTP status error: %s", response.status)
                 browser.close()
                 return []
 
-            payload = response.json()
+            # Safe JSON parsing to prevent crash if blocked by Cloudflare HTML
+            try:
+                payload = response.json()
+            except Exception as json_err:
+                log.error("Failed to parse SportyBet response as JSON (possible Cloudflare block). Text preview: %s", response.text()[:200])
+                browser.close()
+                return []
+
             browser.close()
+
+            if not isinstance(payload, (dict, list)):
+                log.warning("Unexpected SportyBet payload format.")
+                return []
 
             for item in walk_dicts(payload):
                 home = item.get("homeTeamName") or item.get("homeTeam")
@@ -159,9 +183,10 @@ def fetch_sportybet_accumulator_candidates():
                             "odds": price,
                         })
 
+        log.info("Successfully parsed %d valid selection candidates.", len(parsed_events))
         return parsed_events
     except Exception as exc:
-        log.warning("Scraper failed: %s", exc)
+        log.exception("SportyBet Playwright scraper encountered an error: %s", exc)
         return []
 
 
