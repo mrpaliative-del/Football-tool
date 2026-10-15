@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Football-tool: Advanced SportyBet Accumulator Scanner.
-Filters teams based on corners, chances created, fouls, cards, and H2H dominance
-targeting ~5.0 total combined odds.
+"""Football-tool: Advanced SportyBet Accumulator Scanner (API Mode).
+Filters matches via direct high-speed API requests to avoid headless browser crashes.
+Targeting ~5.0 total combined odds.
 """
 
 import hashlib
@@ -13,20 +13,7 @@ from collections import deque
 from datetime import datetime, timezone
 from itertools import combinations
 
-# Setup logging immediately
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format="%(asctime)s %(levelname)s %(message)s",
-)
-log = logging.getLogger("football-tool")
-
-try:
-    import httpx
-    from playwright.sync_api import sync_playwright
-except ImportError as imp_err:
-    log.critical("Missing required package during startup: %s. Check requirements.txt", imp_err)
-    sys.exit(1)
+import httpx
 
 # ============================================================
 # CONFIGURATION
@@ -43,6 +30,10 @@ ACCUMULATOR_TOLERANCE = float(os.getenv("ACCUMULATOR_TOLERANCE", "0.5"))
 
 SPORTYBET_ENABLED = os.getenv("SPORTYBET_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 SPORTYBET_URL = os.getenv("SPORTYBET_URL", "https://www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents").strip()
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("football-tool")
 
 SENT_ALERTS = set()
 ALERT_ORDER = deque()
@@ -72,7 +63,7 @@ def passes_performance_criteria(team_name, stats_data):
 
 
 # ============================================================
-# SPORTYBET & ACCUMULATOR LOGIC
+# SPORTYBET API SCRAPER (NO BROWSER CRASHES)
 # ============================================================
 
 def walk_dicts(value):
@@ -85,103 +76,87 @@ def walk_dicts(value):
             yield from walk_dicts(child)
 
 
-def fetch_sportybet_accumulator_candidates():
+def fetch_sportybet_accumulator_candidates(client):
     if not SPORTYBET_ENABLED:
         return []
 
     parsed_events = []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://www.sportybet.com/ng/",
+    }
+    params = {
+        "pageSize": "100",
+        "timeline": "48"
+    }
+
     try:
-        with sync_playwright() as p:
-            log.info("Launching Playwright Chromium browser...")
-            browser = p.chromium.launch(
-                headless=True, 
-                args=[
-                    "--no-sandbox", 
-                    "--disable-setuid-sandbox", 
-                    "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled"
-                ]
-            )
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                viewport={"width": 1280, "height": 800}
-            )
-            page = context.new_page()
-            
-            log.info("Navigating to SportyBet...")
-            page.goto("https://www.sportybet.com/ng/", wait_until="domcontentloaded", timeout=45000)
-            time.sleep(5)
+        log.info("Fetching SportyBet fixtures via API...")
+        response = client.get(SPORTYBET_URL, headers=headers, params=params, timeout=30)
 
-            target_url = f"{SPORTYBET_URL}?pageSize=100&timeline=48"
-            log.info("Fetching odds endpoint: %s", target_url)
-            response = page.request.get(target_url)
+        if response.status_code >= 400:
+            log.warning("SportyBet HTTP status error: %s", response.status_code)
+            return []
 
-            if response.status >= 400:
-                log.warning("SportyBet HTTP status error: %s", response.status)
-                browser.close()
-                return []
+        try:
+            payload = response.json()
+        except Exception:
+            log.error("Failed to parse SportyBet response as JSON. Preview: %s", response.text[:200])
+            return []
 
-            try:
-                payload = response.json()
-            except Exception as json_err:
-                log.error("Failed to parse SportyBet response as JSON. Preview: %s", response.text()[:200])
-                browser.close()
-                return []
+        if not isinstance(payload, (dict, list)):
+            log.warning("Unexpected SportyBet payload format.")
+            return []
 
-            browser.close()
+        for item in walk_dicts(payload):
+            home = item.get("homeTeamName") or item.get("homeTeam")
+            away = item.get("awayTeamName") or item.get("awayTeam")
+            if not isinstance(home, str) or not isinstance(away, str):
+                continue
 
-            if not isinstance(payload, (dict, list)):
-                log.warning("Unexpected SportyBet payload format.")
-                return []
-
-            for item in walk_dicts(payload):
-                home = item.get("homeTeamName") or item.get("homeTeam")
-                away = item.get("awayTeamName") or item.get("awayTeam")
-                if not isinstance(home, str) or not isinstance(away, str):
+            markets = item.get("markets") or item.get("marketList") or []
+            for market in markets if isinstance(markets, list) else []:
+                if not isinstance(market, dict):
+                    continue
+                
+                market_name = str(market.get("marketName") or market.get("name") or "").lower()
+                if not any(label in market_name for label in ("1x2", "match result")):
                     continue
 
-                markets = item.get("markets") or item.get("marketList") or []
-                for market in markets if isinstance(markets, list) else []:
-                    if not isinstance(market, dict):
-                        continue
-                    
-                    market_name = str(market.get("marketName") or market.get("name") or "").lower()
-                    if not any(label in market_name for label in ("1x2", "match result")):
+                for selection in market.get("outcomes", []) or []:
+                    label = str(selection.get("outcomeName") or selection.get("name") or "").strip().lower()
+                    try:
+                        price = float(selection.get("odds") or selection.get("price"))
+                    except (TypeError, ValueError):
                         continue
 
-                    for selection in market.get("outcomes", []) or []:
-                        label = str(selection.get("outcomeName") or selection.get("name") or "").strip().lower()
-                        try:
-                            price = float(selection.get("odds") or selection.get("price"))
-                        except (TypeError, ValueError):
-                            continue
+                    if price < 1.30 or price > 3.00:
+                        continue
 
-                        if price < 1.30 or price > 3.00:
-                            continue
+                    if label in {"1", "home", "home win"}:
+                        selected_team = home
+                        outcome_label = f"Home ({home})"
+                    elif label in {"2", "away", "away win"}:
+                        selected_team = away
+                        outcome_label = f"Away ({away})"
+                    else:
+                        continue
 
-                        if label in {"1", "home", "home win"}:
-                            selected_team = home
-                            outcome_label = f"Home ({home})"
-                        elif label in {"2", "away", "away win"}:
-                            selected_team = away
-                            outcome_label = f"Away ({away})"
-                        else:
-                            continue
+                    mock_stats = {}
+                    if not passes_performance_criteria(selected_team, mock_stats):
+                        continue
 
-                        mock_stats = {}
-                        if not passes_performance_criteria(selected_team, mock_stats):
-                            continue
-
-                        parsed_events.append({
-                            "match": f"{home} vs {away}",
-                            "selection": outcome_label,
-                            "odds": price,
-                        })
+                    parsed_events.append({
+                        "match": f"{home} vs {away}",
+                        "selection": outcome_label,
+                        "odds": price,
+                    })
 
         log.info("Successfully parsed %d valid selection candidates.", len(parsed_events))
         return parsed_events
     except Exception as exc:
-        log.exception("SportyBet Playwright scraper encountered an error: %s", exc)
+        log.exception("SportyBet API scraper encountered an error: %s", exc)
         return []
 
 
@@ -238,7 +213,7 @@ def send_telegram(client, message):
 
 
 def scan(client):
-    candidates = fetch_sportybet_accumulator_candidates()
+    candidates = fetch_sportybet_accumulator_candidates(client)
     accumulators = build_accumulators(candidates)
     
     sent_count = 0
@@ -257,8 +232,8 @@ def scan(client):
 
 
 def run_forever():
-    log.info("Football-tool Advanced Accumulator Scanner started.")
-    with httpx.Client() as client:
+    log.info("Football-tool API Accumulator Scanner started.")
+    with httpx.Client(follow_redirects=True) as client:
         while True:
             try:
                 scan(client)
