@@ -7,13 +7,26 @@ targeting ~5.0 total combined odds.
 import hashlib
 import logging
 import os
+import sys
 import time
 from collections import deque
 from datetime import datetime, timezone
 from itertools import combinations
 
-import httpx
-from playwright.sync_api import sync_playwright
+# Setup logging immediately
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+log = logging.getLogger("football-tool")
+
+try:
+    import httpx
+    from playwright.sync_api import sync_playwright
+except ImportError as imp_err:
+    log.critical("Missing required package during startup: %s. Check requirements.txt", imp_err)
+    sys.exit(1)
 
 # ============================================================
 # CONFIGURATION
@@ -31,10 +44,6 @@ ACCUMULATOR_TOLERANCE = float(os.getenv("ACCUMULATOR_TOLERANCE", "0.5"))
 SPORTYBET_ENABLED = os.getenv("SPORTYBET_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 SPORTYBET_URL = os.getenv("SPORTYBET_URL", "https://www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents").strip()
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("football-tool")
-
 SENT_ALERTS = set()
 ALERT_ORDER = deque()
 MAX_REMEMBERED_ALERTS = 2000
@@ -45,31 +54,18 @@ MAX_REMEMBERED_ALERTS = 2000
 # ============================================================
 
 def passes_performance_criteria(team_name, stats_data):
-    """
-    Evaluates whether a team meets your advanced performance criteria:
-    - High corner kicks & chances created
-    - High bound-to-score changes (Big chances)
-    - Few fouls committed & few cards received
-    - Superior H2H record (Wins + Draws > Opponent Wins)
-    """
     if not stats_data:
         return True  # Fallback pass if stats are not yet wired to an external provider
 
     try:
-        # 1. Check disciplinary & efficiency metrics (Few fouls, few cards)
         if stats_data.get("fouls_avg", 15) > 12.0 or stats_data.get("cards_avg", 3) > 2.0:
             return False
-
-        # 2. Check attacking metrics (High corners, high chances created, high bound-to-score)
         if stats_data.get("corners_avg", 0) < 5.0 or stats_data.get("chances_created_avg", 0) < 2.5:
             return False
-
-        # 3. Check Head-to-Head dominance: (Team Wins + Draws) >= Opponent Wins
         team_favorable_h2h = stats_data.get("h2h_wins", 0) + stats_data.get("h2h_draws", 0)
         opponent_wins = stats_data.get("opponent_h2h_wins", 0)
         if team_favorable_h2h < opponent_wins:
             return False
-
         return True
     except Exception:
         return False
@@ -96,6 +92,7 @@ def fetch_sportybet_accumulator_candidates():
     parsed_events = []
     try:
         with sync_playwright() as p:
+            log.info("Launching Playwright Chromium browser...")
             browser = p.chromium.launch(
                 headless=True, 
                 args=[
@@ -113,7 +110,7 @@ def fetch_sportybet_accumulator_candidates():
             
             log.info("Navigating to SportyBet...")
             page.goto("https://www.sportybet.com/ng/", wait_until="domcontentloaded", timeout=45000)
-            time.sleep(5)  # Allow cookies/Cloudflare challenge to settle
+            time.sleep(5)
 
             target_url = f"{SPORTYBET_URL}?pageSize=100&timeline=48"
             log.info("Fetching odds endpoint: %s", target_url)
@@ -124,11 +121,10 @@ def fetch_sportybet_accumulator_candidates():
                 browser.close()
                 return []
 
-            # Safe JSON parsing to prevent crash if blocked by Cloudflare HTML
             try:
                 payload = response.json()
             except Exception as json_err:
-                log.error("Failed to parse SportyBet response as JSON (possible Cloudflare block). Text preview: %s", response.text()[:200])
+                log.error("Failed to parse SportyBet response as JSON. Preview: %s", response.text()[:200])
                 browser.close()
                 return []
 
@@ -164,16 +160,15 @@ def fetch_sportybet_accumulator_candidates():
                             continue
 
                         if label in {"1", "home", "home win"}:
-                            selected_team, opponent = home, away
+                            selected_team = home
                             outcome_label = f"Home ({home})"
                         elif label in {"2", "away", "away win"}:
-                            selected_team, opponent = away, home
+                            selected_team = away
                             outcome_label = f"Away ({away})"
                         else:
                             continue
 
-                        # Hook for your advanced stats evaluation
-                        mock_stats = {}  # Replace with API stats fetcher when ready
+                        mock_stats = {}
                         if not passes_performance_criteria(selected_team, mock_stats):
                             continue
 
@@ -268,9 +263,13 @@ def run_forever():
             try:
                 scan(client)
             except Exception:
-                log.exception("Error in scan cycle.")
+                log.exception("Error during scan cycle execution.")
             time.sleep(SCAN_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":
-    run_forever()
+    try:
+        run_forever()
+    except Exception as e:
+        log.critical("Fatal unhandled exception during startup/runtime: %s", e, exc_info=True)
+        sys.exit(1)
