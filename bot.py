@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Football-tool: Advanced SportyBet Accumulator Scanner with Web Health-Check.
+"""Football-tool: Advanced SportyBet Accumulator Scanner with Web Dashboard.
 Runs the scanner loop while keeping a lightweight web server open for Render.
 """
 
 import hashlib
 import logging
 import os
-import sys
 import threading
 import time
 from collections import deque
@@ -32,7 +31,6 @@ ACCUMULATOR_TOLERANCE = float(os.getenv("ACCUMULATOR_TOLERANCE", "0.5"))
 SPORTYBET_ENABLED = os.getenv("SPORTYBET_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 SPORTYBET_URL = os.getenv("SPORTYBET_URL", "https://www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents").strip()
 
-# Render provides the PORT environment variable automatically
 PORT = int(os.getenv("PORT", "10000"))
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -41,12 +39,25 @@ log = logging.getLogger("football-tool")
 
 SENT_ALERTS = set()
 
-# FastAPI app for Render port-binding requirement
+# Shared state to inspect latest scan results via browser
+LAST_SCAN_STATE = {
+    "last_scan_time": None,
+    "candidates_count": 0,
+    "candidates": [],
+    "accumulators_found": 0,
+    "accumulators": []
+}
+
 app = FastAPI()
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def health_check():
     return {"status": "running", "service": "football-tool accumulator scanner"}
+
+@app.get("/fixtures")
+def get_fixtures():
+    """Inspect current scanned candidates and valid accumulators in browser."""
+    return LAST_SCAN_STATE
 
 
 # ============================================================
@@ -95,11 +106,13 @@ def fetch_sportybet_accumulator_candidates(client):
     try:
         response = client.get(SPORTYBET_URL, headers=headers, params=params, timeout=30)
         if response.status_code >= 400:
+            log.warning("SportyBet API returned status code: %s", response.status_code)
             return []
 
         try:
             payload = response.json()
         except Exception:
+            log.warning("Failed to parse SportyBet payload as JSON.")
             return []
 
         if not isinstance(payload, (dict, list)):
@@ -166,7 +179,7 @@ def build_accumulators(candidates):
                 total_odds *= leg["odds"]
 
             if (ACCUMULATOR_TARGET_ODDS - ACCUMULATOR_TOLERANCE) <= total_odds <= (ACCUMULATOR_TARGET_ODDS + ACCUMULATOR_TOLERANCE):
-                valid_accumulators.append({"legs": combo, "total_odds": total_odds})
+                valid_accumulators.append({"legs": list(combo), "total_odds": total_odds})
 
     return valid_accumulators
 
@@ -187,12 +200,17 @@ def format_accumulator_alert(acc):
 
 def send_telegram(client, message):
     if not TELEGRAMBOTTOKEN or not TARGETCHATID:
+        log.warning("Telegram credentials (TELEGRAMBOTTOKEN or TARGETCHATID) are missing!")
         return False
     url = f"https://api.telegram.org/bot{TELEGRAMBOTTOKEN}/sendMessage"
     try:
         response = client.post(url, json={"chat_id": TARGETCHATID, "text": message, "disable_web_page_preview": True}, timeout=15)
-        return response.status_code < 400
-    except Exception:
+        if response.status_code >= 400:
+            log.error("Telegram API error %s: %s", response.status_code, response.text)
+            return False
+        return True
+    except Exception as exc:
+        log.error("Telegram send exception: %s", exc)
         return False
 
 
@@ -204,6 +222,15 @@ def scan_loop():
                 candidates = fetch_sportybet_accumulator_candidates(client)
                 accumulators = build_accumulators(candidates)
                 
+                # Update shared state for the /fixtures endpoint inspection
+                LAST_SCAN_STATE["last_scan_time"] = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+                LAST_SCAN_STATE["candidates_count"] = len(candidates)
+                LAST_SCAN_STATE["candidates"] = candidates[:30]  # Store preview
+                LAST_SCAN_STATE["accumulators_found"] = len(accumulators)
+                LAST_SCAN_STATE["accumulators"] = accumulators[:10]
+
+                log.info("Scan complete. Candidates found: %d, Matching ~5.0 odds accumulators: %d", len(candidates), len(accumulators))
+
                 for acc in accumulators[:2]:
                     signature = hashlib.sha256(str(acc).encode()).hexdigest()
                     if signature in SENT_ALERTS:
@@ -219,10 +246,8 @@ def scan_loop():
 
 
 if __name__ == "__main__":
-    # Start the background scanning loop in a separate thread
     t = threading.Thread(target=scan_loop, daemon=True)
     t.start()
 
-    # Run Uvicorn on Render's required PORT to satisfy web port scans
     log.info("Starting web server on port %d...", PORT)
     uvicorn.run(app, host="0.0.0.0", port=PORT)
