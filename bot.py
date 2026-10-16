@@ -42,7 +42,6 @@ log = logging.getLogger("football-tool")
 
 SENT_ALERTS = set()
 
-# Shared state to inspect latest scan results via browser
 LAST_SCAN_STATE = {
     "last_scan_time": None,
     "candidates_count": 0,
@@ -59,15 +58,13 @@ def health_check():
 
 @app.get("/fixtures")
 def get_fixtures():
-    """Inspect current scanned candidates and valid accumulators in browser."""
     return LAST_SCAN_STATE
 
 @app.get("/raw-debug")
 def raw_debug():
-    """Live test request to SportyBet API to inspect raw output and status codes."""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://www.sportybet.com/ng/",
         "Origin": "https://www.sportybet.com"
@@ -75,7 +72,11 @@ def raw_debug():
     params = {"pageSize": "10", "timeline": "48"}
     try:
         with httpx.Client(follow_redirects=True) as client:
-            resp = client.get(SPORTYBET_URL, headers=headers, params=params, timeout=15)
+            # Pre-warm session by hitting homepage first to harvest security cookies
+            client.get("https://www.sportybet.com/ng/", headers=headers, timeout=15)
+            
+            # Now call API with cookies established
+            resp = client.get(SPORTYBET_URL, headers={**headers, "Accept": "application/json, text/plain, */*"}, params=params, timeout=15)
             try:
                 json_data = resp.json()
             except Exception:
@@ -84,6 +85,7 @@ def raw_debug():
                 "status_code": resp.status_code,
                 "url_requested": str(resp.url),
                 "headers_received": dict(resp.headers),
+                "cookies_jar": dict(client.cookies),
                 "json_payload": json_data,
                 "raw_text_preview": resp.text[:500] if not json_data else "Parsed successfully as JSON"
             }
@@ -137,6 +139,9 @@ def fetch_sportybet_accumulator_candidates(client):
     params = {"pageSize": "100", "timeline": "48"}
 
     try:
+        # Pre-warm session to get security cookies
+        client.get("https://www.sportybet.com/ng/", headers={**headers, "Accept": "text/html,application/xhtml+xml"}, timeout=15)
+        
         response = client.get(SPORTYBET_URL, headers=headers, params=params, timeout=30)
         log.info("SportyBet API responded with status: %s", response.status_code)
 
