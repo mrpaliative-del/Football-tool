@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Football-tool: Advanced DNB & Over 1.5 Odds API Accumulator Scanner with Multi-Bookmaker Consensus.
+"""Football-tool: Advanced DNB & Over 1.5 Odds API Accumulator Scanner with Kickoff Time Filtering.
 Runs the scanner loop while keeping a lightweight web server open for Render.
 """
 
@@ -8,6 +8,7 @@ import logging
 import os
 import threading
 import time
+from datetime import datetime, timezone, timedelta
 from itertools import combinations
 
 import httpx
@@ -27,6 +28,9 @@ BANKROLLPOOL = max(0.0, float(os.getenv("BANKROLLPOOL", "10000")))
 ACCUMULATOR_TARGET_ODDS = float(os.getenv("ACCUMULATOR_TARGET_ODDS", "5.0"))
 ACCUMULATOR_TOLERANCE = float(os.getenv("ACCUMULATOR_TOLERANCE", "0.5"))
 
+# Only scan fixtures happening within the next 48 hours
+MAX_HOURS_AHEAD = int(os.getenv("MAX_HOURS_AHEAD", "48"))
+
 # The Odds API Configuration
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "e188f95c426fe15af08095768989c06b").strip()
 SOCCER_LEAGUES = [
@@ -45,7 +49,6 @@ log = logging.getLogger("football-tool")
 
 SENT_ALERTS = set()
 
-# Shared state to inspect latest scan results via browser
 LAST_SCAN_STATE = {
     "last_scan_time": None,
     "candidates_count": 0,
@@ -58,16 +61,14 @@ app = FastAPI()
 
 @app.api_route("/", methods=["GET", "HEAD"])
 def health_check():
-    return {"status": "running", "service": "football-tool DNB & Over 1.5 consensus scanner"}
+    return {"status": "running", "service": "football-tool timed scanner"}
 
 @app.get("/fixtures")
 def get_fixtures():
-    """Inspect current scanned candidates and valid accumulators in browser."""
     return LAST_SCAN_STATE
 
 @app.get("/raw-debug")
 def raw_debug():
-    """Live test request to The Odds API requesting DNB and Totals across multiple bookmakers."""
     url = f"https://api.the-odds-api.com/v4/sports/{SOCCER_LEAGUES[0]}/odds/"
     params = {
         "apiKey": ODDS_API_KEY,
@@ -93,11 +94,23 @@ def raw_debug():
 
 
 # ============================================================
-# SCANNER LOGIC WITH MULTI-BOOKMAKER CONSENSUS
+# SCANNER LOGIC WITH TIME VALIDATION
 # ============================================================
+
+def parse_iso_time(time_str):
+    """Safely parse ISO 8601 timestamp from API into a UTC datetime object."""
+    try:
+        if time_str.endswith("Z"):
+            time_str = time_str[:-1] + "+00:00"
+        return datetime.fromisoformat(time_str)
+    except Exception:
+        return None
+
 
 def fetch_odds_api_candidates(client):
     parsed_events = []
+    now_utc = datetime.now(timezone.utc)
+    max_future_time = now_utc + timedelta(hours=MAX_HOURS_AHEAD)
     
     for league in SOCCER_LEAGUES:
         url = f"https://api.the-odds-api.com/v4/sports/{league}/odds/"
@@ -121,14 +134,21 @@ def fetch_odds_api_candidates(client):
             for event in events:
                 home = event.get("home_team")
                 away = event.get("away_team")
+                commence_time_str = event.get("commence_time")
                 bookmakers = event.get("bookmakers", [])
 
-                if not home or not away or len(bookmakers) < 2:
-                    continue  # Require at least 2 bookmakers for consensus check
+                if not home or not away or not commence_time_str or len(bookmakers) < 2:
+                    continue
 
-                # 1. Aggregate DNB prices across all available bookmakers
-                dnb_market_prices = {}  # {outcome_name: [list of prices from different books]}
-                # 2. Aggregate Over 1.5 prices across all available bookmakers
+                # Filter by kickoff window (must be in the future and within next 48 hours)
+                kickoff_dt = parse_iso_time(commence_time_str)
+                if not kickoff_dt or kickoff_dt < now_utc or kickoff_dt > max_future_time:
+                    continue  # Skip fixtures too far away or already started
+
+                # Format human-readable kickoff time (e.g. "Oct 16, 15:00 UTC")
+                formatted_kickoff = kickoff_dt.strftime("%b %d, %H:%M UTC")
+
+                dnb_market_prices = {}
                 over_15_prices = []
 
                 for bookmaker in bookmakers:
@@ -160,24 +180,25 @@ def fetch_odds_api_candidates(client):
                                     except (TypeError, ValueError):
                                         continue
 
-                # Evaluate DNB Multi-Bookmaker Consensus
+                # Evaluate DNB Consensus
                 for team_name, prices in dnb_market_prices.items():
-                    if len(prices) >= 2:  # Found across multiple books
+                    if len(prices) >= 2:
                         avg_price = sum(prices) / len(prices)
-                        # Consensus rule: Ensure average market odds are in range and bookmakers don't wildly disagree (spread < 0.40)
                         if 1.30 <= avg_price <= 2.50 and (max(prices) - min(prices)) <= 0.40:
                             parsed_events.append({
                                 "match": f"{home} vs {away}",
+                                "kickoff": formatted_kickoff,
                                 "selection": f"DNB ({team_name})",
                                 "odds": round(avg_price, 2),
                             })
 
-                # Evaluate Over 1.5 Multi-Bookmaker Consensus
+                # Evaluate Over 1.5 Consensus
                 if len(over_15_prices) >= 2:
                     avg_over_price = sum(over_15_prices) / len(over_15_prices)
                     if 1.25 <= avg_over_price <= 2.20 and (max(over_15_prices) - min(over_15_prices)) <= 0.30:
                         parsed_events.append({
                             "match": f"{home} vs {away}",
+                            "kickoff": formatted_kickoff,
                             "selection": "Over 1.5 Goals",
                             "odds": round(avg_over_price, 2),
                         })
@@ -207,21 +228,21 @@ def build_accumulators(candidates):
 
 def format_accumulator_alert(acc):
     lines = [
-        "🎯 CONSENSUS DNB & OVER 1.5 5-ODDS ACCUMULATOR",
+        "🎯 TIMED CONSENSUS 5-ODDS ACCUMULATOR",
         f"Combined Total Odds: **{acc['total_odds']:.2f}**",
         f"Illustrative Stake: {BANKROLLPOOL:,.2f}",
         f"Potential Payout: {BANKROLLPOOL * acc['total_odds']:,.2f}",
         "",
-        "Selected Legs (Multi-Bookmaker Verified):",
+        "Selected Legs (Upcoming Fixtures):",
     ]
     for i, leg in enumerate(acc["legs"], 1):
-        lines.append(f"{i}. {leg['match']} — Pick: **{leg['selection']}** @ {leg['odds']:.2f}")
+        lines.append(f"{i}. **{leg['match']}**\n   🕒 Kickoff: {leg['kickoff']}\n   👉 Pick: **{leg['selection']}** @ {leg['odds']:.2f}")
     return "\n".join(lines)
 
 
 def send_telegram(client, message):
     if not TELEGRAMBOTTOKEN or not TARGETCHATID:
-        log.warning("Telegram credentials (TELEGRAMBOTTOKEN or TARGETCHATID) are missing!")
+        log.warning("Telegram credentials missing!")
         return False
     url = f"https://api.telegram.org/bot{TELEGRAMBOTTOKEN}/sendMessage"
     try:
@@ -236,7 +257,7 @@ def send_telegram(client, message):
 
 
 def scan_loop():
-    log.info("Consensus DNB & Over 1.5 Scanner background thread started.")
+    log.info("Timed Consensus Scanner background thread started.")
     with httpx.Client(follow_redirects=True) as client:
         while True:
             try:
@@ -249,7 +270,7 @@ def scan_loop():
                 LAST_SCAN_STATE["accumulators_found"] = len(accumulators)
                 LAST_SCAN_STATE["accumulators"] = accumulators[:10]
 
-                log.info("Scan complete. Candidates found: %d, Matching ~5.0 odds accumulators: %d", len(candidates), len(accumulators))
+                log.info("Scan complete. Candidates found (next 48h): %d, Matching ~5.0 odds accumulators: %d", len(candidates), len(accumulators))
 
                 for acc in accumulators[:2]:
                     signature = hashlib.sha256(str(acc).encode()).hexdigest()
