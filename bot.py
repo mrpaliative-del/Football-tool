@@ -31,6 +31,10 @@ ACCUMULATOR_TOLERANCE = float(os.getenv("ACCUMULATOR_TOLERANCE", "0.5"))
 SPORTYBET_ENABLED = os.getenv("SPORTYBET_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 SPORTYBET_URL = os.getenv("SPORTYBET_URL", "https://www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents").strip()
 
+# Guard against missing protocol in environment variables
+if SPORTYBET_URL and not SPORTYBET_URL.startswith(("http://", "https://")):
+    SPORTYBET_URL = "https://" + SPORTYBET_URL
+
 PORT = int(os.getenv("PORT", "10000"))
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
