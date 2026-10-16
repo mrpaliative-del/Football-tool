@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Football-tool: Global Multi-League Statistical Scanner & Timeline Bot.
 Queries ESPN's global public JSON scoreboards across 20+ top international leagues,
-applies authentic sporting probability modeling, and dispatches chronologically 
-sorted ~5.0 odds accumulators to Telegram every 90 minutes.
+applies authentic sporting probability modeling, includes country/regional badges, 
+and dispatches chronologically sorted ~5.0 odds accumulators to Telegram every 90 minutes.
 """
 
 import hashlib
@@ -79,7 +79,6 @@ def estimate_sporting_probabilities(home_team, away_team):
         "LA Galaxy", "Seattle Sounders FC", "CF Monterrey", "Tigres UANL", "Club América", "São Paulo", "Atletico Mineiro"
     }
 
-    # Base market probability weightings
     if home_team in elite_clubs and away_team not in elite_clubs:
         home_win_prob, draw_prob, away_win_prob = 0.76, 0.16, 0.08
     elif away_team in elite_clubs and home_team not in elite_clubs:
@@ -93,22 +92,17 @@ def estimate_sporting_probabilities(home_team, away_team):
     else:
         home_win_prob, draw_prob, away_win_prob = 0.42, 0.31, 0.27
 
-    # Converting probabilities to fair decimal odds with a standard 5% bookmaker margin
     margin = 1.05
     home_win_odds = round(min(2.50, max(1.15, (1.0 / home_win_prob) * margin)), 2)
     away_win_odds = round(min(2.50, max(1.15, (1.0 / away_win_prob) * margin)), 2)
     
-    # Double Chance Odds Calculation (1X and X2)
     home_dc_odds = round(max(1.10, 1.0 / (home_win_prob + draw_prob)), 2)
     away_dc_odds = round(max(1.10, 1.0 / (away_win_prob + draw_prob)), 2)
 
-    # Goal expectancy (Over 1.5 probability based on club profiles)
     over_15_prob = 0.78 if (home_team in elite_clubs or away_team in elite_clubs) else 0.68
     over_15_odds = round(max(1.20, min(1.85, (1.0 / over_15_prob) * margin)), 2)
 
     return {
-        "home_win_odds": home_win_odds,
-        "away_win_odds": away_win_odds,
         "home_dc_odds": home_dc_odds,
         "away_dc_odds": away_dc_odds,
         "over_15_odds": over_15_odds,
@@ -119,43 +113,37 @@ def estimate_sporting_probabilities(home_team, away_team):
 
 def fetch_espn_global_candidates(client):
     """
-    Queries ESPN's public endpoints for real-world fixtures across 20+ GLOBAL 
-    competitions and evaluates high-probability selections strictly adhering to sporting reality.
+    Queries ESPN's public endpoints across 20+ global competitions, 
+    tags each fixture with its country/region badge, and filters valid candidates.
     """
     parsed_candidates = []
     now_utc = datetime.now(timezone.utc)
     max_future_time = now_utc + timedelta(hours=MAX_HOURS_AHEAD)
 
-    # Global Tier-1 and Tier-2 League Endpoints across Europe, Americas, Asia, & Continental Cups
-    espn_endpoints = [
-        # European Top Flights
-        "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard",  # Premier League
-        "https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard",  # La Liga
-        "https://site.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard",  # Serie A
-        "https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard",  # Bundesliga
-        "https://site.api.espn.com/apis/site/v2/sports/soccer/fra.1/scoreboard",  # Ligue 1
-        "https://site.api.espn.com/apis/site/v2/sports/soccer/por.1/scoreboard",  # Liga Portugal
-        "https://site.api.espn.com/apis/site/v2/sports/soccer/ned.1/scoreboard",  # Eredivisie
-        "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.2/scoreboard",  # EFL Championship
-        
-        # UEFA Continental Competitions
-        "https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.champions/scoreboard",  # UEFA Champions League
-        "https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.europa/scoreboard",     # UEFA Europa League
-        
-        # North & South America
-        "https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/scoreboard",  # Major League Soccer (MLS)
-        "https://site.api.espn.com/apis/site/v2/sports/soccer/mex.1/scoreboard",  # Liga MX
-        "https://site.api.espn.com/apis/site/v2/sports/soccer/bra.1/scoreboard",  # Brasil Série A
-        "https://site.api.espn.com/apis/site/v2/sports/soccer/arg.1/scoreboard",  # Argentina Primera División
-        "https://site.api.espn.com/apis/site/v2/sports/soccer/conmebol.libertadores/scoreboard", # Copa Libertadores
+    # Dictionary mapping ESPN endpoint slugs to clean Country/Region labels & flags
+    espn_sources = {
+        "eng.1": ("🏴󠁧󠁢󠁥󠁮󠁧󠁿 England (Premier League)", "England"),
+        "esp.1": ("🇪🇸 Spain (La Liga)", "Spain"),
+        "ita.1": ("🇮🇹 Italy (Serie A)", "Italy"),
+        "ger.1": ("🇩🇪 Germany (Bundesliga)", "Germany"),
+        "fra.1": ("🇫🇷 France (Ligue 1)", "France"),
+        "por.1": ("🇵🇹 Portugal (Liga Portugal)", "Portugal"),
+        "ned.1": ("🇳🇱 Netherlands (Eredivisie)", "Netherlands"),
+        "eng.2": ("🏴󠁧󠁢󠁥󠁮󠁧󠁿 England (EFL Championship)", "England"),
+        "uefa.champions": ("🇪🇺 Europe (UEFA Champions League)", "Europe"),
+        "uefa.europa": ("🇪🇺 Europe (UEFA Europa League)", "Europe"),
+        "usa.1": ("🇺🇸 USA (MLS)", "USA"),
+        "mex.1": ("🇲🇽 Mexico (Liga MX)", "Mexico"),
+        "bra.1": ("🇧🇷 Brazil (Série A)", "Brazil"),
+        "arg.1": ("🇦🇷 Argentina (Primera División)", "Argentina"),
+        "conmebol.libertadores": ("🌎 South America (Copa Libertadores)", "South America"),
+        "sau.1": ("🇸🇦 Saudi Arabia (Saudi Pro League)", "Saudi Arabia"),
+        "jpn.1": ("🇯🇵 Japan (J1 League)", "Japan"),
+        "afc.champions": ("🌏 Asia (AFC Champions League)", "Asia")
+    }
 
-        # Asia & Middle East
-        "https://site.api.espn.com/apis/site/v2/sports/soccer/sau.1/scoreboard",  # Saudi Pro League
-        "https://site.api.espn.com/apis/site/v2/sports/soccer/jpn.1/scoreboard",  # J1 League
-        "https://site.api.espn.com/apis/site/v2/sports/soccer/afc.champions/scoreboard" # AFC Champions League
-    ]
-
-    for url in espn_endpoints:
+    for slug, (league_label, country) in espn_sources.items():
+        url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{slug}/scoreboard"
         try:
             response = client.get(url, timeout=15)
             if response.status_code != 200:
@@ -198,20 +186,24 @@ def fetch_espn_global_candidates(client):
 
                 stats = estimate_sporting_probabilities(home_team, away_team)
 
-                # 1. Home Double Chance (Only generated if Home team holds statistical backing)
+                # 1. Home Double Chance
                 if stats["home_prob"] >= 0.35 and 1.15 <= stats["home_dc_odds"] <= 1.75:
                     parsed_candidates.append({
                         "match": f"{home_team} vs {away_team}",
+                        "league": league_label,
+                        "country": country,
                         "kickoff": formatted_kickoff,
                         "kickoff_dt": kickoff_dt,
                         "selection": f"Win or Draw ({home_team})",
                         "odds": stats["home_dc_odds"],
                     })
 
-                # 2. Away Double Chance (Only generated if Away team holds statistical backing)
+                # 2. Away Double Chance
                 if stats["away_prob"] >= 0.35 and 1.15 <= stats["away_dc_odds"] <= 1.75:
                     parsed_candidates.append({
                         "match": f"{home_team} vs {away_team}",
+                        "league": league_label,
+                        "country": country,
                         "kickoff": formatted_kickoff,
                         "kickoff_dt": kickoff_dt,
                         "selection": f"Win or Draw ({away_team})",
@@ -222,6 +214,8 @@ def fetch_espn_global_candidates(client):
                 if 1.20 <= stats["over_15_odds"] <= 1.85:
                     parsed_candidates.append({
                         "match": f"{home_team} vs {away_team}",
+                        "league": league_label,
+                        "country": country,
                         "kickoff": formatted_kickoff,
                         "kickoff_dt": kickoff_dt,
                         "selection": "Over 1.5 Goals",
@@ -231,7 +225,6 @@ def fetch_espn_global_candidates(client):
         except Exception as exc:
             log.warning("Error fetching ESPN feed %s: %s", url, exc)
 
-    # Chronological sorting by kickoff time across all global leagues
     parsed_candidates.sort(key=lambda x: x["kickoff_dt"])
     return parsed_candidates
 
@@ -265,7 +258,12 @@ def format_accumulator_alert(acc):
         f"Selected Legs ({len(acc['legs'])}-Fold Chronological Combo):",
     ]
     for i, leg in enumerate(acc["legs"], 1):
-        lines.append(f"{i}. **{leg['match']}**\n   🕒 Kickoff: {leg['kickoff']}\n   👉 Pick: **{leg['selection']}** @ {leg['odds']:.2f}")
+        lines.append(
+            f"{i}. **{leg['match']}**\n"
+            f"   🏆 Competition: {leg['league']}\n"
+            f"   🕒 Kickoff: {leg['kickoff']}\n"
+            f"   👉 Pick: **{leg['selection']}** @ {leg['odds']:.2f}"
+        )
     return "\n".join(lines)
 
 
@@ -290,7 +288,7 @@ def scan_loop():
     with httpx.Client(follow_redirects=True) as client:
         while True:
             try:
-                log.info("Fetching global fixtures across 20+ leagues and applying statistical models...")
+                log.info("Fetching global fixtures with country badges and applying statistical models...")
                 candidates = fetch_espn_global_candidates(client)
                 accumulators = build_accumulators(candidates)
                 
