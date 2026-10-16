@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Football-tool: Expanded-Leg Adaptive DC & Over 1.5 Odds API Scanner.
+"""Football-tool: Expanded Adaptive DC & Over 1.5 Odds API Scanner.
 Runs the scanner loop while keeping a lightweight web server open for Render.
 """
 
@@ -22,7 +22,7 @@ import uvicorn
 TELEGRAMBOTTOKEN = os.getenv("TELEGRAMBOTTOKEN", "").strip()
 TARGETCHATID = os.getenv("TARGETCHATID", "").strip()
 
-SCAN_INTERVAL_SECONDS = max(60, int(os.getenv("SCAN_INTERVAL_SECONDS", "900")))
+SCAN_INTERVAL_SECONDS = max(60, int(os.getenv("SCAN_INTERVAL_SECONDS", "3600"))) # Default to 1 hour (Hourly rolling structure)
 BANKROLLPOOL = max(0.0, float(os.getenv("BANKROLLPOOL", "10000")))
 
 ACCUMULATOR_TARGET_ODDS = float(os.getenv("ACCUMULATOR_TARGET_ODDS", "5.0"))
@@ -31,6 +31,7 @@ ACCUMULATOR_TOLERANCE = float(os.getenv("ACCUMULATOR_TOLERANCE", "0.50")) # 4.50
 MAX_HOURS_AHEAD = int(os.getenv("MAX_HOURS_AHEAD", "48"))
 MIN_HOURS_TO_KICKOFF = float(os.getenv("MIN_HOURS_TO_KICKOFF", "0.0"))
 
+# Replace the string below if you generate a new key on The Odds API dashboard
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "e188f95c426fe15af08095768989c06b").strip()
 SOCCER_LEAGUES = [
     "soccer_epl",
@@ -59,7 +60,7 @@ app = FastAPI()
 
 @app.api_route("/", methods=["GET", "HEAD"])
 def health_check():
-    return {"status": "running", "service": "football-tool expanded adaptive scanner"}
+    return {"status": "running", "service": "football-tool hourly rolling scanner"}
 
 @app.get("/fixtures")
 def get_fixtures():
@@ -120,7 +121,10 @@ def fetch_odds_api_candidates(client):
 
         try:
             response = client.get(url, params=params, timeout=30)
-            if response.status_code != 200:
+            if response.status_code == 401:
+                log.error("Odds API returned 401 Unauthorized for league %s. Please check your ODDS_API_KEY.", league)
+                continue
+            elif response.status_code != 200:
                 log.warning("Odds API returned status %s for league %s", response.status_code, league)
                 continue
 
@@ -215,7 +219,7 @@ def fetch_odds_api_candidates(client):
 
 def build_accumulators(candidates):
     valid_accumulators = []
-    # Expanded combination depth: test 4-folds, 5-folds, and 6-folds for safe DC odds
+    # Test 4-folds, 5-folds, and 6-folds for safe DC odds to hit ~5.0 target
     for r in (4, 5, 6):
         for combo in combinations(candidates, r):
             if len(set(leg["match"] for leg in combo)) != len(combo):
@@ -262,7 +266,7 @@ def send_telegram(client, message):
 
 
 def scan_loop():
-    log.info("Expanded Adaptive Scanner background thread started.")
+    log.info("Hourly Rolling Scanner background thread started.")
     with httpx.Client(follow_redirects=True) as client:
         while True:
             try:
