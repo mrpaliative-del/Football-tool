@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Football-tool: Advanced DNB & Over 1.5 Odds API Accumulator Scanner with Kickoff Time Filtering.
+"""Football-tool: Advanced Odds API Accumulator Scanner (H2H & Totals with Kickoff Filter).
 Runs the scanner loop while keeping a lightweight web server open for Render.
 """
 
@@ -28,7 +28,6 @@ BANKROLLPOOL = max(0.0, float(os.getenv("BANKROLLPOOL", "10000")))
 ACCUMULATOR_TARGET_ODDS = float(os.getenv("ACCUMULATOR_TARGET_ODDS", "5.0"))
 ACCUMULATOR_TOLERANCE = float(os.getenv("ACCUMULATOR_TOLERANCE", "0.5"))
 
-# Only scan fixtures happening within the next 48 hours
 MAX_HOURS_AHEAD = int(os.getenv("MAX_HOURS_AHEAD", "48"))
 
 # The Odds API Configuration
@@ -37,8 +36,7 @@ SOCCER_LEAGUES = [
     "soccer_epl",
     "soccer_spain_la_liga",
     "soccer_italy_serie_a",
-    "soccer_germany_bundesliga",
-    "soccer_uefa_champions_league"
+    "soccer_germany_bundesliga"
 ]
 
 PORT = int(os.getenv("PORT", "10000"))
@@ -61,7 +59,7 @@ app = FastAPI()
 
 @app.api_route("/", methods=["GET", "HEAD"])
 def health_check():
-    return {"status": "running", "service": "football-tool timed scanner"}
+    return {"status": "running", "service": "football-tool stable scanner"}
 
 @app.get("/fixtures")
 def get_fixtures():
@@ -73,7 +71,7 @@ def raw_debug():
     params = {
         "apiKey": ODDS_API_KEY,
         "regions": "eu,uk",
-        "markets": "draw_no_bet,totals",
+        "markets": "h2h,totals",
         "oddsFormat": "decimal"
     }
     try:
@@ -94,11 +92,10 @@ def raw_debug():
 
 
 # ============================================================
-# SCANNER LOGIC WITH TIME VALIDATION
+# SCANNER LOGIC
 # ============================================================
 
 def parse_iso_time(time_str):
-    """Safely parse ISO 8601 timestamp from API into a UTC datetime object."""
     try:
         if time_str.endswith("Z"):
             time_str = time_str[:-1] + "+00:00"
@@ -117,7 +114,7 @@ def fetch_odds_api_candidates(client):
         params = {
             "apiKey": ODDS_API_KEY,
             "regions": "eu,uk",
-            "markets": "draw_no_bet,totals",
+            "markets": "h2h,totals",
             "oddsFormat": "decimal"
         }
 
@@ -140,15 +137,13 @@ def fetch_odds_api_candidates(client):
                 if not home or not away or not commence_time_str or len(bookmakers) < 2:
                     continue
 
-                # Filter by kickoff window (must be in the future and within next 48 hours)
                 kickoff_dt = parse_iso_time(commence_time_str)
                 if not kickoff_dt or kickoff_dt < now_utc or kickoff_dt > max_future_time:
-                    continue  # Skip fixtures too far away or already started
+                    continue
 
-                # Format human-readable kickoff time (e.g. "Oct 16, 15:00 UTC")
                 formatted_kickoff = kickoff_dt.strftime("%b %d, %H:%M UTC")
 
-                dnb_market_prices = {}
+                h2h_market_prices = {}
                 over_15_prices = []
 
                 for bookmaker in bookmakers:
@@ -157,14 +152,14 @@ def fetch_odds_api_candidates(client):
                         market_key = m.get("key")
                         outcomes = m.get("outcomes", [])
 
-                        if market_key == "draw_no_bet":
+                        if market_key == "h2h":
                             for outcome in outcomes:
                                 name = outcome.get("name")
                                 price = outcome.get("price")
                                 if name and price:
                                     try:
                                         p = float(price)
-                                        dnb_market_prices.setdefault(name, []).append(p)
+                                        h2h_market_prices.setdefault(name, []).append(p)
                                     except (TypeError, ValueError):
                                         continue
 
@@ -180,22 +175,23 @@ def fetch_odds_api_candidates(client):
                                     except (TypeError, ValueError):
                                         continue
 
-                # Evaluate DNB Consensus
-                for team_name, prices in dnb_market_prices.items():
-                    if len(prices) >= 2:
+                # Evaluate H2H Consensus (Home/Away win selections priced safely between 1.40 and 2.50)
+                for team_name, prices in h2h_market_prices.items():
+                    if team_name in (home, away) and len(prices) >= 2:
                         avg_price = sum(prices) / len(prices)
-                        if 1.30 <= avg_price <= 2.50 and (max(prices) - min(prices)) <= 0.40:
+                        if 1.40 <= avg_price <= 2.50 and (max(prices) - min(prices)) <= 0.40:
+                            selection_label = f"Home ({home})" if team_name == home else f"Away ({away})"
                             parsed_events.append({
                                 "match": f"{home} vs {away}",
                                 "kickoff": formatted_kickoff,
-                                "selection": f"DNB ({team_name})",
+                                "selection": selection_label,
                                 "odds": round(avg_price, 2),
                             })
 
                 # Evaluate Over 1.5 Consensus
                 if len(over_15_prices) >= 2:
                     avg_over_price = sum(over_15_prices) / len(over_15_prices)
-                    if 1.25 <= avg_over_price <= 2.20 and (max(over_15_prices) - min(over_15_prices)) <= 0.30:
+                    if 1.25 <= avg_over_price <= 1.90 and (max(over_15_prices) - min(over_15_prices)) <= 0.30:
                         parsed_events.append({
                             "match": f"{home} vs {away}",
                             "kickoff": formatted_kickoff,
