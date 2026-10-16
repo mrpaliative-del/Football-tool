@@ -31,7 +31,6 @@ ACCUMULATOR_TOLERANCE = float(os.getenv("ACCUMULATOR_TOLERANCE", "0.5"))
 SPORTYBET_ENABLED = os.getenv("SPORTYBET_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 SPORTYBET_URL = os.getenv("SPORTYBET_URL", "https://www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents").strip()
 
-# Guard against missing protocol in environment variables
 if SPORTYBET_URL and not SPORTYBET_URL.startswith(("http://", "https://")):
     SPORTYBET_URL = "https://" + SPORTYBET_URL
 
@@ -69,7 +68,9 @@ def raw_debug():
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://www.sportybet.com/ng/",
+        "Origin": "https://www.sportybet.com"
     }
     params = {"pageSize": "10", "timeline": "48"}
     try:
@@ -129,20 +130,29 @@ def fetch_sportybet_accumulator_candidates(client):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://www.sportybet.com/ng/",
+        "Origin": "https://www.sportybet.com"
     }
     params = {"pageSize": "100", "timeline": "48"}
 
     try:
         response = client.get(SPORTYBET_URL, headers=headers, params=params, timeout=30)
-        if response.status_code >= 400:
-            log.warning("SportyBet API returned status code: %s", response.status_code)
+        log.info("SportyBet API responded with status: %s", response.status_code)
+
+        if response.status_code not in (200, 202):
+            log.warning("SportyBet API returned unexpected status code: %s", response.status_code)
+            return []
+
+        content_type = response.headers.get("content-type", "")
+        if "application/json" not in content_type:
+            log.warning("SportyBet returned non-JSON content-type (%s). Preview: %s", content_type, response.text[:300])
             return []
 
         try:
             payload = response.json()
-        except Exception:
-            log.warning("Failed to parse SportyBet payload as JSON.")
+        except Exception as json_err:
+            log.warning("Failed to parse SportyBet payload as JSON: %s. Preview: %s", json_err, response.text[:200])
             return []
 
         if not isinstance(payload, (dict, list)):
