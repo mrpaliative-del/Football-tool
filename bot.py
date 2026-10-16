@@ -10,7 +10,6 @@ import sys
 import threading
 import time
 from collections import deque
-from datetime import datetime, timezone
 from itertools import combinations
 
 import httpx
@@ -41,8 +40,6 @@ logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format="%(a
 log = logging.getLogger("football-tool")
 
 SENT_ALERTS = set()
-ALERT_ORDER = deque()
-MAX_REMEMBERED_ALERTS = 2000
 
 # FastAPI app for Render port-binding requirement
 app = FastAPI()
