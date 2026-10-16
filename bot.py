@@ -1,5 +1,5 @@
 #!/usr/init/env python3
-"""Football-tool: Balanced DC & Over 1.5 Odds API Scanner.
+"""Football-tool: Expanded-Leg DC & Over 1.5 Odds API Scanner.
 Runs the scanner loop while keeping a lightweight web server open for Render.
 """
 
@@ -26,9 +26,8 @@ SCAN_INTERVAL_SECONDS = max(60, int(os.getenv("SCAN_INTERVAL_SECONDS", "900")))
 BANKROLLPOOL = max(0.0, float(os.getenv("BANKROLLPOOL", "10000")))
 
 ACCUMULATOR_TARGET_ODDS = float(os.getenv("ACCUMULATOR_TARGET_ODDS", "5.0"))
-ACCUMULATOR_TOLERANCE = float(os.getenv("ACCUMULATOR_TOLERANCE", "0.40")) # Balanced tolerance: 4.60 - 5.40
+ACCUMULATOR_TOLERANCE = float(os.getenv("ACCUMULATOR_TOLERANCE", "0.40")) # 4.60 - 5.40
 
-# Extended window to 48 hours to capture more weekend fixtures
 MAX_HOURS_AHEAD = int(os.getenv("MAX_HOURS_AHEAD", "48"))
 MIN_HOURS_TO_KICKOFF = float(os.getenv("MIN_HOURS_TO_KICKOFF", "0.0"))
 
@@ -60,7 +59,7 @@ app = FastAPI()
 
 @app.api_route("/", methods=["GET", "HEAD"])
 def health_check():
-    return {"status": "running", "service": "football-tool balanced scanner"}
+    return {"status": "running", "service": "football-tool expanded-leg scanner"}
 
 @app.get("/fixtures")
 def get_fixtures():
@@ -135,7 +134,6 @@ def fetch_odds_api_candidates(client):
                 commence_time_str = event.get("commence_time")
                 bookmakers = event.get("bookmakers", [])
 
-                # Lowered bookmaker threshold to 2 for balanced candidate flow
                 if not home or not away or not commence_time_str or len(bookmakers) < 2:
                     continue
 
@@ -181,7 +179,7 @@ def fetch_odds_api_candidates(client):
                                     except (TypeError, ValueError):
                                         continue
 
-                # 1. Over 1.5 Goals (Broader Corridor: 1.25 - 1.85)
+                # 1. Over 1.5 Goals
                 if len(over_15_prices) >= 2:
                     avg_over_price = sum(over_15_prices) / len(over_15_prices)
                     if 1.25 <= avg_over_price <= 1.85:
@@ -193,7 +191,7 @@ def fetch_odds_api_candidates(client):
                                 "odds": round(avg_over_price, 2),
                             })
 
-                # 2. Win or Draw / Double Chance equivalent (Broader Corridor: 1.20 - 1.70)
+                # 2. Win or Draw / Double Chance equivalent
                 for team_name, prices in h2h_market_prices.items():
                     if team_name in (home, away) and len(prices) >= 2:
                         avg_price = sum(prices) / len(prices)
@@ -217,7 +215,8 @@ def fetch_odds_api_candidates(client):
 
 def build_accumulators(candidates):
     valid_accumulators = []
-    for r in (2, 3):
+    # Expanded combination depth: 3-folds and 4-folds (r = 3, 4)
+    for r in (3, 4):
         for combo in combinations(candidates, r):
             if len(set(leg["match"] for leg in combo)) != len(combo):
                 continue
@@ -234,12 +233,12 @@ def build_accumulators(candidates):
 
 def format_accumulator_alert(acc):
     lines = [
-        "🎯 BALANCED DC & OVER 1.5 ACCUMULATOR",
+        "🎯 EXPANDED-LEG 5-ODDS ACCUMULATOR",
         f"Combined Total Odds: **{acc['total_odds']:.2f}**",
         f"Illustrative Stake: {BANKROLLPOOL:,.2f}",
         f"Potential Payout: {BANKROLLPOOL * acc['total_odds']:,.2f}",
         "",
-        "Selected Legs:",
+        "Selected Legs (3 & 4-Fold Combos):",
     ]
     for i, leg in enumerate(acc["legs"], 1):
         lines.append(f"{i}. **{leg['match']}**\n   🕒 Kickoff: {leg['kickoff']}\n   👉 Pick: **{leg['selection']}** @ {leg['odds']:.2f}")
@@ -263,7 +262,7 @@ def send_telegram(client, message):
 
 
 def scan_loop():
-    log.info("Balanced Scanner background thread started.")
+    log.info("Expanded-Leg Scanner background thread started.")
     with httpx.Client(follow_redirects=True) as client:
         while True:
             try:
