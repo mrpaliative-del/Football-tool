@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-"""Football-tool: Advanced SportyBet Accumulator Scanner (API Mode).
-Filters matches via direct high-speed API requests to avoid headless browser crashes.
-Targeting ~5.0 total combined odds.
+"""Football-tool: Advanced SportyBet Accumulator Scanner with Web Health-Check.
+Runs the scanner loop while keeping a lightweight web server open for Render.
 """
 
 import hashlib
 import logging
 import os
 import sys
+import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
 from itertools import combinations
 
 import httpx
+from fastapi import FastAPI
+import uvicorn
 
 # ============================================================
 # CONFIGURATION
@@ -31,6 +33,9 @@ ACCUMULATOR_TOLERANCE = float(os.getenv("ACCUMULATOR_TOLERANCE", "0.5"))
 SPORTYBET_ENABLED = os.getenv("SPORTYBET_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 SPORTYBET_URL = os.getenv("SPORTYBET_URL", "https://www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents").strip()
 
+# Render provides the PORT environment variable automatically
+PORT = int(os.getenv("PORT", "10000"))
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("football-tool")
@@ -39,15 +44,21 @@ SENT_ALERTS = set()
 ALERT_ORDER = deque()
 MAX_REMEMBERED_ALERTS = 2000
 
+# FastAPI app for Render port-binding requirement
+app = FastAPI()
+
+@app.get("/")
+def health_check():
+    return {"status": "running", "service": "football-tool accumulator scanner"}
+
 
 # ============================================================
-# ADVANCED METRICS EVALUATION FUNCTION
+# SCANNER LOGIC
 # ============================================================
 
 def passes_performance_criteria(team_name, stats_data):
     if not stats_data:
-        return True  # Fallback pass if stats are not yet wired to an external provider
-
+        return True
     try:
         if stats_data.get("fouls_avg", 15) > 12.0 or stats_data.get("cards_avg", 3) > 2.0:
             return False
@@ -61,10 +72,6 @@ def passes_performance_criteria(team_name, stats_data):
     except Exception:
         return False
 
-
-# ============================================================
-# SPORTYBET API SCRAPER (NO BROWSER CRASHES)
-# ============================================================
 
 def walk_dicts(value):
     if isinstance(value, dict):
@@ -86,27 +93,19 @@ def fetch_sportybet_accumulator_candidates(client):
         "Accept": "application/json, text/plain, */*",
         "Referer": "https://www.sportybet.com/ng/",
     }
-    params = {
-        "pageSize": "100",
-        "timeline": "48"
-    }
+    params = {"pageSize": "100", "timeline": "48"}
 
     try:
-        log.info("Fetching SportyBet fixtures via API...")
         response = client.get(SPORTYBET_URL, headers=headers, params=params, timeout=30)
-
         if response.status_code >= 400:
-            log.warning("SportyBet HTTP status error: %s", response.status_code)
             return []
 
         try:
             payload = response.json()
         except Exception:
-            log.error("Failed to parse SportyBet response as JSON. Preview: %s", response.text[:200])
             return []
 
         if not isinstance(payload, (dict, list)):
-            log.warning("Unexpected SportyBet payload format.")
             return []
 
         for item in walk_dicts(payload):
@@ -143,8 +142,7 @@ def fetch_sportybet_accumulator_candidates(client):
                     else:
                         continue
 
-                    mock_stats = {}
-                    if not passes_performance_criteria(selected_team, mock_stats):
+                    if not passes_performance_criteria(selected_team, {}):
                         continue
 
                     parsed_events.append({
@@ -153,10 +151,9 @@ def fetch_sportybet_accumulator_candidates(client):
                         "odds": price,
                     })
 
-        log.info("Successfully parsed %d valid selection candidates.", len(parsed_events))
         return parsed_events
     except Exception as exc:
-        log.exception("SportyBet API scraper encountered an error: %s", exc)
+        log.exception("SportyBet API error: %s", exc)
         return []
 
 
@@ -184,7 +181,7 @@ def format_accumulator_alert(acc):
         f"Illustrative Stake: {BANKROLLPOOL:,.2f}",
         f"Potential Payout: {BANKROLLPOOL * acc['total_odds']:,.2f}",
         "",
-        "Selected Legs (Optimized for Corners, Chances & Low Fouls):",
+        "Selected Legs:",
     ]
     for i, leg in enumerate(acc["legs"], 1):
         lines.append(f"{i}. {leg['match']} — Pick: **{leg['selection']}** @ {leg['odds']:.2f}")
@@ -193,58 +190,42 @@ def format_accumulator_alert(acc):
 
 def send_telegram(client, message):
     if not TELEGRAMBOTTOKEN or not TARGETCHATID:
-        log.error("Telegram credentials missing.")
         return False
-
     url = f"https://api.telegram.org/bot{TELEGRAMBOTTOKEN}/sendMessage"
     try:
-        response = client.post(
-            url,
-            json={"chat_id": TARGETCHATID, "text": message, "disable_web_page_preview": True},
-            timeout=15,
-        )
-        if response.status_code >= 400:
-            log.error("Telegram HTTP %s: %s", response.status_code, response.text[:250])
-            return False
-        return True
-    except (httpx.HTTPError, ValueError) as exc:
-        log.error("Telegram send failed: %s", exc)
+        response = client.post(url, json={"chat_id": TARGETCHATID, "text": message, "disable_web_page_preview": True}, timeout=15)
+        return response.status_code < 400
+    except Exception:
         return False
 
 
-def scan(client):
-    candidates = fetch_sportybet_accumulator_candidates(client)
-    accumulators = build_accumulators(candidates)
-    
-    sent_count = 0
-    for acc in accumulators[:2]:
-        signature = hashlib.sha256(str(acc).encode()).hexdigest()
-        if signature in SENT_ALERTS:
-            continue
-        
-        message = format_accumulator_alert(acc)
-        if send_telegram(client, message):
-            SENT_ALERTS.add(signature)
-            sent_count += 1
-            log.info("Alert triggered for %.2f odds accumulator.", acc['total_odds'])
-
-    log.info("Completed scan cycle. Sent %d accumulator alerts.", sent_count)
-
-
-def run_forever():
-    log.info("Football-tool API Accumulator Scanner started.")
+def scan_loop():
+    log.info("Scanner background thread started.")
     with httpx.Client(follow_redirects=True) as client:
         while True:
             try:
-                scan(client)
+                candidates = fetch_sportybet_accumulator_candidates(client)
+                accumulators = build_accumulators(candidates)
+                
+                for acc in accumulators[:2]:
+                    signature = hashlib.sha256(str(acc).encode()).hexdigest()
+                    if signature in SENT_ALERTS:
+                        continue
+                    
+                    message = format_accumulator_alert(acc)
+                    if send_telegram(client, message):
+                        SENT_ALERTS.add(signature)
+                        log.info("Alert triggered for %.2f odds accumulator.", acc['total_odds'])
             except Exception:
-                log.exception("Error during scan cycle execution.")
+                log.exception("Error in scan cycle.")
             time.sleep(SCAN_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":
-    try:
-        run_forever()
-    except Exception as e:
-        log.critical("Fatal unhandled exception during startup/runtime: %s", e, exc_info=True)
-        sys.exit(1)
+    # Start the background scanning loop in a separate thread
+    t = threading.Thread(target=scan_loop, daemon=True)
+    t.start()
+
+    # Run Uvicorn on Render's required PORT to satisfy web port scans
+    log.info("Starting web server on port %d...", PORT)
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
