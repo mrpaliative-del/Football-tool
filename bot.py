@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
-"""Football-tool: Expanded Adaptive DC & Over 1.5 Odds API Scanner.
+#!/usr/init/env python3
+"""Football-tool: Hourly Rolling DC & Over 1.5 Odds API Scanner.
 Runs the scanner loop while keeping a lightweight web server open for Render.
 """
 
@@ -22,7 +22,7 @@ import uvicorn
 TELEGRAMBOTTOKEN = os.getenv("TELEGRAMBOTTOKEN", "").strip()
 TARGETCHATID = os.getenv("TARGETCHATID", "").strip()
 
-SCAN_INTERVAL_SECONDS = max(60, int(os.getenv("SCAN_INTERVAL_SECONDS", "3600"))) # Default to 1 hour (Hourly rolling structure)
+SCAN_INTERVAL_SECONDS = max(60, int(os.getenv("SCAN_INTERVAL_SECONDS", "3600"))) # Hourly rolling loop
 BANKROLLPOOL = max(0.0, float(os.getenv("BANKROLLPOOL", "10000")))
 
 ACCUMULATOR_TARGET_ODDS = float(os.getenv("ACCUMULATOR_TARGET_ODDS", "5.0"))
@@ -31,7 +31,7 @@ ACCUMULATOR_TOLERANCE = float(os.getenv("ACCUMULATOR_TOLERANCE", "0.50")) # 4.50
 MAX_HOURS_AHEAD = int(os.getenv("MAX_HOURS_AHEAD", "48"))
 MIN_HOURS_TO_KICKOFF = float(os.getenv("MIN_HOURS_TO_KICKOFF", "0.0"))
 
-# Replace the string below if you generate a new key on The Odds API dashboard
+# Replace with your active Odds API key if generating a fresh one
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "e188f95c426fe15af08095768989c06b").strip()
 SOCCER_LEAGUES = [
     "soccer_epl",
