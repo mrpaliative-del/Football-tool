@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Football-tool: Hybrid Self-Contained Resilient Scanner.
+"""Football-tool: Hybrid Resilient Self-Contained Scanner.
 Combines static fixtures, statistical modeling, and local caching fallback.
 """
 
@@ -97,8 +97,8 @@ def fetch_hybrid_candidates():
                 })
 
         # Evaluating Away Double Chance (Win or Draw)
-        if fix["away_strength"] >= 1.30 or fix["away_strength'] > fix["home_strength"]:
-            modeled_odds = round(max(1.15, 2.10 - (fix["away_strength'] * 0.45)), 2)
+        if fix["away_strength"] >= 1.30 or fix["away_strength"] > fix["home_strength"]:
+            modeled_odds = round(max(1.15, 2.10 - (fix["away_strength"] * 0.45)), 2)
             if 1.15 <= modeled_odds <= 1.75:
                 parsed_candidates.append({
                     "match": f"{home} vs {away}",
