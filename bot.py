@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Football-tool: Advanced Odds API Accumulator Scanner with Web Dashboard & Raw Debugger.
+"""Football-tool: Advanced DNB & Over 1.5 Odds API Accumulator Scanner with Multi-Bookmaker Consensus.
 Runs the scanner loop while keeping a lightweight web server open for Render.
 """
 
@@ -58,7 +58,7 @@ app = FastAPI()
 
 @app.api_route("/", methods=["GET", "HEAD"])
 def health_check():
-    return {"status": "running", "service": "football-tool odds-api scanner"}
+    return {"status": "running", "service": "football-tool DNB & Over 1.5 consensus scanner"}
 
 @app.get("/fixtures")
 def get_fixtures():
@@ -67,12 +67,12 @@ def get_fixtures():
 
 @app.get("/raw-debug")
 def raw_debug():
-    """Live test request to The Odds API to inspect raw output and status codes."""
+    """Live test request to The Odds API requesting DNB and Totals across multiple bookmakers."""
     url = f"https://api.the-odds-api.com/v4/sports/{SOCCER_LEAGUES[0]}/odds/"
     params = {
         "apiKey": ODDS_API_KEY,
         "regions": "eu,uk",
-        "markets": "h2h",
+        "markets": "draw_no_bet,totals",
         "oddsFormat": "decimal"
     }
     try:
@@ -86,28 +86,15 @@ def raw_debug():
                 "status_code": resp.status_code,
                 "url_requested": str(resp.url),
                 "remaining_requests": resp.headers.get("x-requests-remaining"),
-                "json_payload": json_data[:3] if isinstance(json_data, list) else json_data
+                "json_payload": json_data[:2] if isinstance(json_data, list) else json_data
             }
     except Exception as exc:
         return {"error": str(exc)}
 
 
 # ============================================================
-# SCANNER LOGIC
+# SCANNER LOGIC WITH MULTI-BOOKMAKER CONSENSUS
 # ============================================================
-
-def passes_performance_criteria(team_name, stats_data):
-    if not stats_data:
-        return True
-    try:
-        if stats_data.get("fouls_avg", 15) > 12.0 or stats_data.get("cards_avg", 3) > 2.0:
-            return False
-        if stats_data.get("corners_avg", 0) < 5.0 or stats_data.get("chances_created_avg", 0) < 2.5:
-            return False
-        return True
-    except Exception:
-        return False
-
 
 def fetch_odds_api_candidates(client):
     parsed_events = []
@@ -117,7 +104,7 @@ def fetch_odds_api_candidates(client):
         params = {
             "apiKey": ODDS_API_KEY,
             "regions": "eu,uk",
-            "markets": "h2h",
+            "markets": "draw_no_bet,totals",
             "oddsFormat": "decimal"
         }
 
@@ -136,54 +123,64 @@ def fetch_odds_api_candidates(client):
                 away = event.get("away_team")
                 bookmakers = event.get("bookmakers", [])
 
-                if not home or not away or not bookmakers:
-                    continue
+                if not home or not away or len(bookmakers) < 2:
+                    continue  # Require at least 2 bookmakers for consensus check
 
-                bookmaker = bookmakers[0]
-                markets = bookmaker.get("markets", [])
-                
-                h2h_market = None
-                for m in markets:
-                    if m.get("key") == "h2h":
-                        h2h_market = m
-                        break
+                # 1. Aggregate DNB prices across all available bookmakers
+                dnb_market_prices = {}  # {outcome_name: [list of prices from different books]}
+                # 2. Aggregate Over 1.5 prices across all available bookmakers
+                over_15_prices = []
 
-                if not h2h_market:
-                    continue
+                for bookmaker in bookmakers:
+                    markets = bookmaker.get("markets", [])
+                    for m in markets:
+                        market_key = m.get("key")
+                        outcomes = m.get("outcomes", [])
 
-                outcomes = h2h_market.get("outcomes", [])
-                for outcome in outcomes:
-                    name = outcome.get("name")
-                    price = outcome.get("price")
+                        if market_key == "draw_no_bet":
+                            for outcome in outcomes:
+                                name = outcome.get("name")
+                                price = outcome.get("price")
+                                if name and price:
+                                    try:
+                                        p = float(price)
+                                        dnb_market_prices.setdefault(name, []).append(p)
+                                    except (TypeError, ValueError):
+                                        continue
 
-                    if not name or not price:
-                        continue
+                        elif market_key == "totals":
+                            for outcome in outcomes:
+                                name = outcome.get("name", "").lower()
+                                point = outcome.get("point")
+                                price = outcome.get("price")
+                                if "over" in name and point == 1.5 and price:
+                                    try:
+                                        p = float(price)
+                                        over_15_prices.append(p)
+                                    except (TypeError, ValueError):
+                                        continue
 
-                    try:
-                        price = float(price)
-                    except (TypeError, ValueError):
-                        continue
+                # Evaluate DNB Multi-Bookmaker Consensus
+                for team_name, prices in dnb_market_prices.items():
+                    if len(prices) >= 2:  # Found across multiple books
+                        avg_price = sum(prices) / len(prices)
+                        # Consensus rule: Ensure average market odds are in range and bookmakers don't wildly disagree (spread < 0.40)
+                        if 1.30 <= avg_price <= 2.50 and (max(prices) - min(prices)) <= 0.40:
+                            parsed_events.append({
+                                "match": f"{home} vs {away}",
+                                "selection": f"DNB ({team_name})",
+                                "odds": round(avg_price, 2),
+                            })
 
-                    if price < 1.30 or price > 3.00:
-                        continue
-
-                    if name == home:
-                        outcome_label = f"Home ({home})"
-                        selected_team = home
-                    elif name == away:
-                        outcome_label = f"Away ({away})"
-                        selected_team = away
-                    else:
-                        continue
-
-                    if not passes_performance_criteria(selected_team, {}):
-                        continue
-
-                    parsed_events.append({
-                        "match": f"{home} vs {away}",
-                        "selection": outcome_label,
-                        "odds": price,
-                    })
+                # Evaluate Over 1.5 Multi-Bookmaker Consensus
+                if len(over_15_prices) >= 2:
+                    avg_over_price = sum(over_15_prices) / len(over_15_prices)
+                    if 1.25 <= avg_over_price <= 2.20 and (max(over_15_prices) - min(over_15_prices)) <= 0.30:
+                        parsed_events.append({
+                            "match": f"{home} vs {away}",
+                            "selection": "Over 1.5 Goals",
+                            "odds": round(avg_over_price, 2),
+                        })
 
         except Exception as exc:
             log.exception("Error fetching league %s: %s", league, exc)
@@ -210,12 +207,12 @@ def build_accumulators(candidates):
 
 def format_accumulator_alert(acc):
     lines = [
-        "🎯 ADVANCED METRICS 5-ODDS ACCUMULATOR",
+        "🎯 CONSENSUS DNB & OVER 1.5 5-ODDS ACCUMULATOR",
         f"Combined Total Odds: **{acc['total_odds']:.2f}**",
         f"Illustrative Stake: {BANKROLLPOOL:,.2f}",
         f"Potential Payout: {BANKROLLPOOL * acc['total_odds']:,.2f}",
         "",
-        "Selected Legs:",
+        "Selected Legs (Multi-Bookmaker Verified):",
     ]
     for i, leg in enumerate(acc["legs"], 1):
         lines.append(f"{i}. {leg['match']} — Pick: **{leg['selection']}** @ {leg['odds']:.2f}")
@@ -239,7 +236,7 @@ def send_telegram(client, message):
 
 
 def scan_loop():
-    log.info("Odds API Scanner background thread started.")
+    log.info("Consensus DNB & Over 1.5 Scanner background thread started.")
     with httpx.Client(follow_redirects=True) as client:
         while True:
             try:
