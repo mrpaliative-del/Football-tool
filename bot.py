@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Football-tool: Advanced SportyBet Accumulator Scanner with Web Dashboard.
+"""Football-tool: Advanced SportyBet Accumulator Scanner with Web Dashboard & Raw Debugger.
 Runs the scanner loop while keeping a lightweight web server open for Render.
 """
 
@@ -58,6 +58,32 @@ def health_check():
 def get_fixtures():
     """Inspect current scanned candidates and valid accumulators in browser."""
     return LAST_SCAN_STATE
+
+@app.get("/raw-debug")
+def raw_debug():
+    """Live test request to SportyBet API to inspect raw output and status codes."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://www.sportybet.com/ng/",
+    }
+    params = {"pageSize": "10", "timeline": "48"}
+    try:
+        with httpx.Client(follow_redirects=True) as client:
+            resp = client.get(SPORTYBET_URL, headers=headers, params=params, timeout=15)
+            try:
+                json_data = resp.json()
+            except Exception:
+                json_data = None
+            return {
+                "status_code": resp.status_code,
+                "url_requested": str(resp.url),
+                "headers_received": dict(resp.headers),
+                "json_payload": json_data,
+                "raw_text_preview": resp.text[:500] if not json_data else "Parsed successfully as JSON"
+            }
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 # ============================================================
@@ -148,105 +174,3 @@ def fetch_sportybet_accumulator_candidates(client):
                         outcome_label = f"Home ({home})"
                     elif label in {"2", "away", "away win"}:
                         selected_team = away
-                        outcome_label = f"Away ({away})"
-                    else:
-                        continue
-
-                    if not passes_performance_criteria(selected_team, {}):
-                        continue
-
-                    parsed_events.append({
-                        "match": f"{home} vs {away}",
-                        "selection": outcome_label,
-                        "odds": price,
-                    })
-
-        return parsed_events
-    except Exception as exc:
-        log.exception("SportyBet API error: %s", exc)
-        return []
-
-
-def build_accumulators(candidates):
-    valid_accumulators = []
-    for r in (2, 3):
-        for combo in combinations(candidates, r):
-            if len(set(leg["match"] for leg in combo)) != len(combo):
-                continue
-
-            total_odds = 1.0
-            for leg in combo:
-                total_odds *= leg["odds"]
-
-            if (ACCUMULATOR_TARGET_ODDS - ACCUMULATOR_TOLERANCE) <= total_odds <= (ACCUMULATOR_TARGET_ODDS + ACCUMULATOR_TOLERANCE):
-                valid_accumulators.append({"legs": list(combo), "total_odds": total_odds})
-
-    return valid_accumulators
-
-
-def format_accumulator_alert(acc):
-    lines = [
-        "🎯 ADVANCED METRICS 5-ODDS ACCUMULATOR",
-        f"Combined Total Odds: **{acc['total_odds']:.2f}**",
-        f"Illustrative Stake: {BANKROLLPOOL:,.2f}",
-        f"Potential Payout: {BANKROLLPOOL * acc['total_odds']:,.2f}",
-        "",
-        "Selected Legs:",
-    ]
-    for i, leg in enumerate(acc["legs"], 1):
-        lines.append(f"{i}. {leg['match']} — Pick: **{leg['selection']}** @ {leg['odds']:.2f}")
-    return "\n".join(lines)
-
-
-def send_telegram(client, message):
-    if not TELEGRAMBOTTOKEN or not TARGETCHATID:
-        log.warning("Telegram credentials (TELEGRAMBOTTOKEN or TARGETCHATID) are missing!")
-        return False
-    url = f"https://api.telegram.org/bot{TELEGRAMBOTTOKEN}/sendMessage"
-    try:
-        response = client.post(url, json={"chat_id": TARGETCHATID, "text": message, "disable_web_page_preview": True}, timeout=15)
-        if response.status_code >= 400:
-            log.error("Telegram API error %s: %s", response.status_code, response.text)
-            return False
-        return True
-    except Exception as exc:
-        log.error("Telegram send exception: %s", exc)
-        return False
-
-
-def scan_loop():
-    log.info("Scanner background thread started.")
-    with httpx.Client(follow_redirects=True) as client:
-        while True:
-            try:
-                candidates = fetch_sportybet_accumulator_candidates(client)
-                accumulators = build_accumulators(candidates)
-                
-                LAST_SCAN_STATE["last_scan_time"] = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-                LAST_SCAN_STATE["candidates_count"] = len(candidates)
-                LAST_SCAN_STATE["candidates"] = candidates[:30]
-                LAST_SCAN_STATE["accumulators_found"] = len(accumulators)
-                LAST_SCAN_STATE["accumulators"] = accumulators[:10]
-
-                log.info("Scan complete. Candidates found: %d, Matching ~5.0 odds accumulators: %d", len(candidates), len(accumulators))
-
-                for acc in accumulators[:2]:
-                    signature = hashlib.sha256(str(acc).encode()).hexdigest()
-                    if signature in SENT_ALERTS:
-                        continue
-                    
-                    message = format_accumulator_alert(acc)
-                    if send_telegram(client, message):
-                        SENT_ALERTS.add(signature)
-                        log.info("Alert triggered for %.2f odds accumulator.", acc['total_odds'])
-            except Exception:
-                log.exception("Error in scan cycle.")
-            time.sleep(SCAN_INTERVAL_SECONDS)
-
-
-if __name__ == "__main__":
-    t = threading.Thread(target=scan_loop, daemon=True)
-    t.start()
-
-    log.info("Starting web server on port %d...", PORT)
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
