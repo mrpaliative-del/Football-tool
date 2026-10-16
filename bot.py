@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Football-tool: Adaptive-Leg DC & Over 1.5 Odds API Scanner.
+"""Football-tool: Expanded-Leg Adaptive DC & Over 1.5 Odds API Scanner.
 Runs the scanner loop while keeping a lightweight web server open for Render.
 """
 
@@ -26,7 +26,7 @@ SCAN_INTERVAL_SECONDS = max(60, int(os.getenv("SCAN_INTERVAL_SECONDS", "900")))
 BANKROLLPOOL = max(0.0, float(os.getenv("BANKROLLPOOL", "10000")))
 
 ACCUMULATOR_TARGET_ODDS = float(os.getenv("ACCUMULATOR_TARGET_ODDS", "5.0"))
-ACCUMULATOR_TOLERANCE = float(os.getenv("ACCUMULATOR_TOLERANCE", "0.50")) # Expanded tolerance: 4.50 - 5.50
+ACCUMULATOR_TOLERANCE = float(os.getenv("ACCUMULATOR_TOLERANCE", "0.50")) # 4.50 - 5.50
 
 MAX_HOURS_AHEAD = int(os.getenv("MAX_HOURS_AHEAD", "48"))
 MIN_HOURS_TO_KICKOFF = float(os.getenv("MIN_HOURS_TO_KICKOFF", "0.0"))
@@ -59,7 +59,7 @@ app = FastAPI()
 
 @app.api_route("/", methods=["GET", "HEAD"])
 def health_check():
-    return {"status": "running", "service": "football-tool adaptive scanner"}
+    return {"status": "running", "service": "football-tool expanded adaptive scanner"}
 
 @app.get("/fixtures")
 def get_fixtures():
@@ -179,7 +179,7 @@ def fetch_odds_api_candidates(client):
                                     except (TypeError, ValueError):
                                         continue
 
-                # 1. Over 1.5 Goals (Broader corridor to capture value)
+                # 1. Over 1.5 Goals
                 if len(over_15_prices) >= 2:
                     avg_over_price = sum(over_15_prices) / len(over_15_prices)
                     if 1.20 <= avg_over_price <= 1.95:
@@ -215,8 +215,8 @@ def fetch_odds_api_candidates(client):
 
 def build_accumulators(candidates):
     valid_accumulators = []
-    # Fully adaptive combination depth: test 2-folds, 3-folds, and 4-folds
-    for r in (2, 3, 4):
+    # Expanded combination depth: test 4-folds, 5-folds, and 6-folds for safe DC odds
+    for r in (4, 5, 6):
         for combo in combinations(candidates, r):
             if len(set(leg["match"] for leg in combo)) != len(combo):
                 continue
@@ -233,7 +233,7 @@ def build_accumulators(candidates):
 
 def format_accumulator_alert(acc):
     lines = [
-        "🎯 ADAPTIVE MAX-EFFICIENCY 5-ODDS ACCUMULATOR",
+        "🎯 MAX-EFFICIENCY 5-ODDS ACCUMULATOR",
         f"Combined Total Odds: **{acc['total_odds']:.2f}**",
         f"Illustrative Stake: {BANKROLLPOOL:,.2f}",
         f"Potential Payout: {BANKROLLPOOL * acc['total_odds']:,.2f}",
@@ -262,7 +262,7 @@ def send_telegram(client, message):
 
 
 def scan_loop():
-    log.info("Adaptive Scanner background thread started.")
+    log.info("Expanded Adaptive Scanner background thread started.")
     with httpx.Client(follow_redirects=True) as client:
         while True:
             try:
